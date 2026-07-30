@@ -247,11 +247,59 @@ async fn models() -> Result<()> {
         if list.is_empty() {
             println!("  取不到列表 (上游异常或凭证失效)");
         }
-        for m in &list {
-            println!("  {}", m["id"].as_str().unwrap_or("-"));
+        // 上游顺序在 `/v1/models` 保持原样 (客户端据此选默认模型); 只有 CLI 打印重排。
+        let mut names: Vec<&str> = list
+            .iter()
+            .filter_map(|m| m["id"].as_str())
+            .collect::<Vec<_>>();
+        names.sort_by(|a, b| natural_cmp(a, b));
+        for name in names {
+            println!("  {name}");
         }
     }
     Ok(())
+}
+
+/// 自然序: 数字段按数值比, 其余按字节。
+///
+/// 纯字典序会把 `claude-opus-4-10` 排在 `4-8` 前面; 按数值比才能让同族版本顺次排列。
+fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let (mut x, mut y) = (a.as_bytes(), b.as_bytes());
+    loop {
+        match (x.first(), y.first()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(&p), Some(&q)) if p.is_ascii_digit() && q.is_ascii_digit() => {
+                let (np, rest_x) = take_number(x);
+                let (nq, rest_y) = take_number(y);
+                if np != nq {
+                    return np.cmp(&nq);
+                }
+                (x, y) = (rest_x, rest_y);
+            }
+            (Some(&p), Some(&q)) => {
+                if p != q {
+                    return p.cmp(&q);
+                }
+                (x, y) = (&x[1..], &y[1..]);
+            }
+        }
+    }
+}
+
+/// 溢出退化成 `u128::MAX` (模型名里的日期串远够用), 保证不 panic。
+fn take_number(s: &[u8]) -> (u128, &[u8]) {
+    let end = s
+        .iter()
+        .position(|c| !c.is_ascii_digit())
+        .unwrap_or(s.len());
+    let n = std::str::from_utf8(&s[..end])
+        .ok()
+        .and_then(|d| d.parse::<u128>().ok())
+        .unwrap_or(u128::MAX);
+    (n, &s[end..])
 }
 
 fn parse_provider(name: &str) -> Result<Provider> {
@@ -313,6 +361,39 @@ async fn shutdown() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn model_names_sort_by_family_then_version() {
+        let mut got = vec![
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-opus-4-10",
+            "claude-opus-4-8",
+            "gpt-5.6-sol",
+            "gpt-5.4-mini",
+            "gpt-5.4",
+        ];
+        got.sort_by(|a, b| super::natural_cmp(a, b));
+        assert_eq!(
+            got,
+            vec![
+                "claude-opus-4-8",
+                // 数值序: 10 在 8 之后 (字典序会排到 8 前面)
+                "claude-opus-4-10",
+                "claude-opus-5",
+                "claude-sonnet-5",
+                "gpt-5.4",
+                "gpt-5.4-mini",
+                "gpt-5.6-sol",
+            ]
+        );
+    }
+
+    #[test]
+    fn oversized_number_does_not_panic() {
+        let huge = "m-".to_string() + &"9".repeat(60);
+        assert_ne!(super::natural_cmp(&huge, "m-1"), std::cmp::Ordering::Less);
+    }
+
     #[test]
     fn session_id_is_uuid_v4_shaped() {
         let id = super::new_session_id();

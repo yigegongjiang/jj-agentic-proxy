@@ -32,7 +32,7 @@ jj-agentic-proxy logout all       # anthropic | codex | all
 ```
 
 - 后台常驻: 脱离终端 (关掉 shell 不影响), 日志落 `~/.config/jj-agentic-proxy/daemon.log`
-- `models` 直接问上游, 与后台是否在跑无关; 结果同 `GET /v1/models`
+- `models` 直接问上游, 与后台是否在跑无关; 内容同 `GET /v1/models`, 打印时按名字自然序重排 (端点仍保上游原序)
 - `start` = restart: 已在运行则先 stop 再起新进程 -> 升级 / 换版本后一条命令即生效, 永不出现两个实例
 - 被外部程序占了固定端口时 start 直接失败并回显日志尾部
 
