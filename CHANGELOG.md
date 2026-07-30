@@ -14,6 +14,13 @@
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-07-31
+
+### Fixed
+
+- 10011 的 `/v1/chat/completions` 带 `temperature` / `top_p` / `top_k` 时不再报 400 (上游新模型已一律拒收): 这些参数改为不转发
+- 10011 的 `reasoning_effort` 不再报 400: 改按上游现行的思考档位下发, 旧写法已被新模型移除
+
 ## [0.4.3] - 2026-07-31
 
 ### Removed

@@ -59,6 +59,7 @@ jj-agentic-proxy logout all       # anthropic | codex | all
 
 - Chat Completions 的上游由端口决定, `model` 只取模型名 (允许 `anthropic/`、`openai/` 前缀)
 - 覆盖: 流式 / 非流式、tools + 工具结果回传、图片 (url 与 data URI)、`response_format`、`reasoning_effort`; 思考内容出 `reasoning_content`
+- 10011 的 Chat Completions 丢弃采样参数 (`temperature` / `top_p` / `top_k`): 上游新模型一律硬拒, 转发必然 400; `reasoning_effort` 映射成上游现行思考档位
 - `/v1/models` 形状: 10011 带 `x-api-key` / `anthropic-version` -> Anthropic 官方原样; 其余 (含 10010) -> OpenAI 列表, 只含本端口 provider 的模型
 - 错误一律按方言裹官方信封 (`{"type":"error",...}` / `{"error":{...}}`); 上游已给官方形状则原样透传, 保留 `request-id` 等头
 - 额度查 `10010/backend-api/codex/usage`

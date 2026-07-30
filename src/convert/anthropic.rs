@@ -9,8 +9,8 @@ use crate::sse;
 
 /// Anthropic 的 max_tokens 必填; 客户端没给时的兜底。
 const DEFAULT_MAX_TOKENS: u64 = 8192;
-/// 上游要求 thinking 预算 >= 1024 且 < max_tokens。
-const THINKING_MIN_BUDGET: u64 = 1024;
+/// 思考 token 也计入输出上限 -> 开思考时抬到这个下限, 免得答案被思考挤空。
+const THINKING_MIN_OUTPUT: u64 = 4096;
 
 // ---------- 请求: chat -> messages ----------
 
@@ -73,27 +73,25 @@ pub fn request(req: &Value, model: &str) -> Value {
     }
 
     let mut limit = max_tokens(req).unwrap_or(DEFAULT_MAX_TOKENS);
-    let budget = thinking_budget(req);
-    if let Some(b) = budget {
-        // 思考 token 也计入输出 -> 上限不足时抬高, 否则上游直接拒绝。
-        limit = limit.max(b + THINKING_MIN_BUDGET);
-        out.insert(
-            "thinking".into(),
-            json!({ "type": "enabled", "budget_tokens": b }),
-        );
+    let effort = reasoning_effort(req);
+    if effort.is_some() {
+        limit = limit.max(THINKING_MIN_OUTPUT);
+        out.insert("thinking".into(), json!({ "type": "adaptive" }));
     }
     out.insert("max_tokens".into(), json!(limit));
 
-    // 开思考时上游不接受采样参数。
-    if budget.is_none() {
-        for key in ["temperature", "top_p", "top_k"] {
-            if let Some(v) = req.get(key).filter(|v| v.is_number()) {
-                out.insert(key.into(), v.clone());
-            }
-        }
+    // 采样参数 (temperature / top_p / top_k) 一律不转发: 上游自 Opus 4.7 起在所有新模型上
+    // 硬拒 ("`temperature` is deprecated for this model", 400), 且名单随新模型持续变化 ->
+    // 不做模型名判断, 统一丢弃 (仅老模型损失采样控制, 换取任何客户端都不会整条请求失败)。
+    let mut cfg = Map::new();
+    if let Some(e) = effort {
+        cfg.insert("effort".into(), json!(e));
     }
     if let Some(f) = output_format(req) {
-        out.insert("output_config".into(), json!({ "format": f }));
+        cfg.insert("format".into(), f);
+    }
+    if !cfg.is_empty() {
+        out.insert("output_config".into(), Value::Object(cfg));
     }
     if let Some(stop) = stop_sequences(req) {
         out.insert("stop_sequences".into(), stop);
@@ -162,13 +160,17 @@ fn image_block(part: &Value) -> Option<Value> {
     }))
 }
 
-/// `reasoning_effort` -> thinking 预算 (Anthropic 只收 token 数, 没有 effort 档位)。
-fn thinking_budget(req: &Value) -> Option<u64> {
+/// `reasoning_effort` -> `output_config.effort` (档位同名直通)。
+///
+/// 上游已移除按 token 数给思考预算的 `thinking.enabled`, 新模型只认 adaptive + effort。
+fn reasoning_effort(req: &Value) -> Option<&'static str> {
     match req.get("reasoning_effort")?.as_str()? {
         "none" | "minimal" => None,
-        "low" => Some(THINKING_MIN_BUDGET),
-        "high" | "xhigh" | "max" => Some(8192),
-        _ => Some(4096), // medium 及未知档位
+        "low" => Some("low"),
+        "high" => Some("high"),
+        "xhigh" => Some("xhigh"),
+        "max" => Some("max"),
+        _ => Some("medium"), // medium 及未知档位
     }
 }
 
@@ -398,26 +400,42 @@ mod tests {
             "response_format": {"type":"json_schema","json_schema":{"name":"r","schema":{"type":"object"}}},
         });
         let out = request(&req, "m");
-        assert_eq!(
-            out["thinking"],
-            json!({"type":"enabled","budget_tokens":1024})
-        );
-        // 上限不足以容纳思考预算 -> 抬高; 开思考时不带采样参数
-        assert_eq!(out["max_tokens"], json!(2048));
-        assert!(out.get("temperature").is_none());
+        // 新模型只认 adaptive + effort 档位, 不认按 token 给的思考预算
+        assert_eq!(out["thinking"], json!({"type":"adaptive"}));
+        assert_eq!(out["output_config"]["effort"], json!("low"));
+        // 上限不足以容纳思考 -> 抬到下限
+        assert_eq!(out["max_tokens"], json!(THINKING_MIN_OUTPUT));
         assert_eq!(
             out["output_config"]["format"],
             json!({"type":"json_schema","schema":{"type":"object"}})
         );
 
-        // 不要思考 -> 采样参数照旧, 上限不动
+        // 不要思考 -> 上限不动, 也不带 output_config
         let plain = request(
             &json!({"messages":[],"max_tokens":100,"temperature":0.5,"reasoning_effort":"none"}),
             "m",
         );
         assert!(plain.get("thinking").is_none());
+        assert!(plain.get("output_config").is_none());
         assert_eq!(plain["max_tokens"], json!(100));
-        assert_eq!(plain["temperature"], json!(0.5));
+    }
+
+    /// 采样参数上游硬拒 (400 deprecated) -> 任何档位下都不转发。
+    #[test]
+    fn sampling_params_are_never_forwarded() {
+        for effort in ["none", "high"] {
+            let out = request(
+                &json!({
+                    "messages": [{"role":"user","content":"hi"}],
+                    "reasoning_effort": effort,
+                    "temperature": 0.5, "top_p": 0.9, "top_k": 40,
+                }),
+                "claude-opus-5",
+            );
+            for key in ["temperature", "top_p", "top_k"] {
+                assert!(out.get(key).is_none(), "{effort}: {key} 应被丢弃");
+            }
+        }
     }
 
     #[test]
