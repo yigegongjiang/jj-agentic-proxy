@@ -29,7 +29,7 @@ pub struct Credential {
 impl Credential {
     /// 距到期不足 `margin` 秒即视为需要刷新。
     pub fn stale(&self, margin: u64) -> bool {
-        now() + margin >= self.expires_at
+        now().saturating_add(margin) >= self.expires_at
     }
 }
 
@@ -43,13 +43,21 @@ pub fn now() -> u64 {
 }
 
 pub fn config_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("JJ_PROXY_CONFIG_DIR") {
+    if let Some(dir) = std::env::var("JJ_PROXY_CONFIG_DIR")
+        .ok()
+        .filter(|dir| !dir.is_empty())
+    {
         return PathBuf::from(dir);
     }
     let base = std::env::var("XDG_CONFIG_HOME")
+        .ok()
+        .filter(|dir| !dir.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        .unwrap_or_else(|| {
+            let home = std::env::var("HOME")
+                .ok()
+                .filter(|dir| !dir.is_empty())
+                .unwrap_or_else(|| ".".to_string());
             PathBuf::from(home).join(".config")
         });
     base.join("jj-agentic-proxy")
@@ -69,11 +77,11 @@ pub fn load() -> Result<Store> {
     }
 }
 
-pub fn save(store: &Store) -> Result<()> {
+fn save(store: &Store) -> Result<()> {
     let dir = config_dir();
     fs::create_dir_all(&dir).with_context(|| format!("创建目录失败: {}", dir.display()))?;
     let path = auth_path();
-    let tmp = dir.join("auth.json.tmp");
+    let tmp = dir.join(format!("auth.json.tmp.{}", std::process::id()));
 
     let mut opts = fs::OpenOptions::new();
     opts.write(true).create(true).truncate(true);
@@ -96,21 +104,44 @@ pub fn save(store: &Store) -> Result<()> {
 /// 串行化 read-modify-write, 防止两家 provider 同时刷新时互相覆盖。
 static RMW_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+fn update<T>(change: impl FnOnce(&mut Store) -> Result<(T, bool)>) -> Result<T> {
+    let _guard = RMW_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = config_dir();
+    fs::create_dir_all(&dir).with_context(|| format!("创建目录失败: {}", dir.display()))?;
+    let lock_path = dir.join("auth.lock");
+    let mut opts = fs::OpenOptions::new();
+    opts.read(true).write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        opts.mode(0o600);
+    }
+    let lock = opts
+        .open(&lock_path)
+        .with_context(|| format!("打开凭证锁失败: {}", lock_path.display()))?;
+    fs4::FileExt::lock(&lock)
+        .with_context(|| format!("锁定凭证文件失败: {}", lock_path.display()))?;
+
+    let mut store = load()?;
+    let (result, changed) = change(&mut store)?;
+    if changed {
+        save(&store)?;
+    }
+    Ok(result)
+}
+
 /// 读取 -> 替换单个 provider 条目 -> 写回, 不影响另一家。
 pub fn put(provider: Provider, cred: &Credential) -> Result<()> {
-    let _guard = RMW_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let mut store = load()?;
-    store.insert(provider.key().to_string(), cred.clone());
-    save(&store)
+    update(|store| {
+        store.insert(provider.key().to_string(), cred.clone());
+        Ok(((), true))
+    })
 }
 
 /// 返回是否真的删掉了条目。
 pub fn remove(provider: Provider) -> Result<bool> {
-    let _guard = RMW_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let mut store = load()?;
-    let existed = store.remove(provider.key()).is_some();
-    if existed {
-        save(&store)?;
-    }
-    Ok(existed)
+    update(|store| {
+        let existed = store.remove(provider.key()).is_some();
+        Ok((existed, existed))
+    })
 }

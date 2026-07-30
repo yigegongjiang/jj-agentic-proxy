@@ -27,20 +27,22 @@ echo "==> Installing ${BIN_NAME} → ${INSTALL_DIR}"
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 tmp_asset="${tmpdir}/${asset}"
+tmp_checksums="${tmpdir}/checksums.txt"
 
 curl -fL --progress-bar --retry 3 -o "$tmp_asset" "${base}/${asset}" || err "download failed"
-
-if hash_line="$(curl -fsSL --retry 3 "${base}/checksums.txt" 2>/dev/null | grep " ${asset}$" || true)"; then
-  if [ -n "$hash_line" ]; then
-    expected="${hash_line%% *}"
-    actual="$(shasum -a 256 "$tmp_asset" | awk '{print $1}')"
-    [ "$expected" = "$actual" ] || err "checksum mismatch"
-  fi
-fi
+curl -fL --progress-bar --retry 3 -o "$tmp_checksums" "${base}/checksums.txt" \
+  || err "checksum download failed"
+expected="$(awk -v asset="$asset" '$2 == asset { print $1; found++ } END { if (found != 1) exit 1 }' "$tmp_checksums")" \
+  || err "checksum entry missing or duplicated: ${asset}"
+actual="$(shasum -a 256 "$tmp_asset" | awk '{print $1}')"
+[ "$expected" = "$actual" ] || err "checksum mismatch"
 
 mkdir -p "$INSTALL_DIR"
-chmod +x "$tmp_asset"
-mv -f "$tmp_asset" "${INSTALL_DIR}/${BIN_NAME}"
+tmp_bin="${INSTALL_DIR}/.${BIN_NAME}.tmp.$$"
+trap 'rm -rf "$tmpdir"; rm -f "$tmp_bin"' EXIT
+cp -f "$tmp_asset" "$tmp_bin"
+chmod +x "$tmp_bin"
+mv -f "$tmp_bin" "${INSTALL_DIR}/${BIN_NAME}"
 
 echo "==> Installed: ${INSTALL_DIR}/${BIN_NAME}"
 

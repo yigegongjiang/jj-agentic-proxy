@@ -8,8 +8,8 @@ use std::time::Instant;
 use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::header::{
-    ACCEPT, AUTHORIZATION, CONNECTION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE,
-    TRANSFER_ENCODING, UPGRADE, USER_AGENT,
+    ACCEPT, AUTHORIZATION, CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, TRANSFER_ENCODING, UPGRADE,
+    USER_AGENT,
 };
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
@@ -196,9 +196,9 @@ pub(crate) async fn upstream(
     stream: bool,
     dialect: Dialect,
 ) -> Result<reqwest::Response, Response> {
-    let mut force_refresh = false;
+    let mut rejected_token: Option<String> = None;
     for attempt in 0..2u8 {
-        let cred = match app.auth.token(provider, force_refresh).await {
+        let cred = match app.auth.token(provider, rejected_token.as_deref()).await {
             Ok(c) => c,
             Err(e) => {
                 return Err(dialect.error(
@@ -226,7 +226,7 @@ pub(crate) async fn upstream(
                 // 401 = token 失效: 强制续期后重试一次。
                 if resp.status() == StatusCode::UNAUTHORIZED && attempt == 0 {
                     tracing::warn!(provider = %provider, "上游 401, 强制刷新 token 重试");
-                    force_refresh = true;
+                    rejected_token = Some(cred.access_token);
                     continue;
                 }
                 return Ok(resp);
@@ -565,7 +565,6 @@ fn is_hop_by_hop(name: &HeaderName) -> bool {
         || name == TRANSFER_ENCODING
         || name == UPGRADE
         || name == CONTENT_LENGTH
-        || name == CONTENT_ENCODING
         || name == "keep-alive"
         || name == "proxy-authenticate"
         || name == "proxy-authorization"
@@ -759,6 +758,13 @@ mod tests {
         let (body, plan) = prepare_body(&t, raw.clone());
         assert_eq!(body, raw);
         assert!(!plan.upstream_stream);
+    }
+
+    #[test]
+    fn content_encoding_is_end_to_end() {
+        assert!(!is_hop_by_hop(&HeaderName::from_static("content-encoding")));
+        assert!(is_hop_by_hop(&CONNECTION));
+        assert!(is_hop_by_hop(&CONTENT_LENGTH));
     }
 
     #[test]

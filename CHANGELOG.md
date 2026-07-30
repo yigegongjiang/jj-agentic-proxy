@@ -14,6 +14,16 @@
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-07-31
+
+### Fixed
+
+- 上游流提前断开不再伪装成正常结束; 非流式返回明确错误, 流式不再发出假的 `stop`
+- 上游连接连续 300s 无数据时结束等待, 压缩响应保留正确编码
+- 并发请求不再重复刷新同一 token; 运行中 login/logout 或并发写凭证立即安全生效
+- `Authorization` 的 Bearer scheme 改为大小写不敏感
+- 安装时校验和缺失/下载失败立即中止; 二进制仍原子替换
+
 ## [0.3.1] - 2026-07-31
 
 ### Added
@@ -55,7 +65,9 @@
 - 凭证到期前自动续期, 上游拒绝时自动重试一次, 无需手工介入
 - 流式回答逐块透传, 首字延迟与官方 CLI 一致
 
-[Unreleased]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.3.1...v0.3.2
+[0.3.1]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/yigegongjiang/jj-agentic-proxy/releases/tag/v0.3.0
 [0.2.0]: https://github.com/yigegongjiang/jj-agentic-proxy/releases/tag/v0.2.0
 [0.1.0]: https://github.com/yigegongjiang/jj-agentic-proxy/releases/tag/v0.1.0

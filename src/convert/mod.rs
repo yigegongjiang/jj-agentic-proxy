@@ -88,13 +88,15 @@ pub fn stream_response(
         let mut bytes = Box::pin(upstream.bytes_stream());
         let mut usage: Option<Value> = None;
         let mut finished = false;
+        let mut failed = false;
 
         yield sse_chunk(&id, &model, created, json!({ "role": "assistant", "content": "" }), None);
 
-        while let Some(item) = bytes.next().await {
+        'upstream: while let Some(item) = bytes.next().await {
             let raw = match item {
                 Ok(b) => b,
                 Err(e) => {
+                    failed = true;
                     yield sse_data(&json!({ "error": { "message": e.to_string(), "type": "upstream_error" } }));
                     break;
                 }
@@ -109,7 +111,10 @@ pub fn stream_response(
                             yield sse_chunk(&id, &model, created, json!({}), Some(reason));
                         }
                         Delta::Finish(_) => {}
-                        Delta::Error(e) => yield sse_data(&json!({ "error": e })),
+                        Delta::Error(e) => {
+                            failed = true;
+                            yield sse_data(&json!({ "error": e }));
+                        }
                         other => {
                             if let Some(v) = delta_value(&other) {
                                 yield sse_chunk(&id, &model, created, v, None);
@@ -117,13 +122,21 @@ pub fn stream_response(
                         }
                     }
                 }
+                if finished || failed {
+                    break 'upstream;
+                }
             }
         }
 
-        if !finished {
-            yield sse_chunk(&id, &model, created, json!({}), Some("stop"));
+        if !finished && !failed {
+            yield sse_data(&json!({
+                "error": {
+                    "message": "上游流在完成事件前结束",
+                    "type": "upstream_error",
+                }
+            }));
         }
-        if include_usage {
+        if include_usage && finished {
             if let Some(u) = usage {
                 yield sse_data(&json!({
                     "id": id, "object": "chat.completion.chunk", "created": created,
@@ -164,9 +177,10 @@ pub async fn aggregate_response(
     let mut reasoning = String::new();
     let mut tools: Vec<(String, String, String)> = Vec::new(); // (id, name, arguments)
     let mut finish = "stop";
+    let mut finished = false;
     let mut usage: Option<Value> = None;
 
-    while let Some(item) = bytes.next().await {
+    'upstream: while let Some(item) = bytes.next().await {
         let raw = match item {
             Ok(b) => b,
             Err(e) => {
@@ -195,14 +209,30 @@ pub async fn aggregate_response(
                         }
                         tools[index].2.push_str(&args);
                     }
-                    Delta::Finish(r) => finish = r,
+                    Delta::Finish(r) => {
+                        finish = r;
+                        finished = true;
+                    }
                     Delta::Usage(u) => usage = Some(u),
                     Delta::Error(e) => {
                         return json_body(StatusCode::BAD_GATEWAY, json!({ "error": e }))
                     }
                 }
             }
+            if finished {
+                break 'upstream;
+            }
         }
+    }
+
+    if !finished {
+        return json_body(
+            StatusCode::BAD_GATEWAY,
+            json!({ "error": {
+                "message": "上游流在完成事件前结束",
+                "type": "upstream_error",
+            } }),
+        );
     }
 
     let mut message = Map::new();
@@ -266,7 +296,7 @@ pub async fn aggregate_responses(upstream: reqwest::Response) -> Response {
     let mut final_response: Option<Value> = None;
     let mut failure: Option<Value> = None;
 
-    while let Some(item) = bytes.next().await {
+    'upstream: while let Some(item) = bytes.next().await {
         let raw = match item {
             Ok(b) => b,
             Err(e) => {
@@ -284,10 +314,17 @@ pub async fn aggregate_responses(upstream: reqwest::Response) -> Response {
             match v.get("type").and_then(Value::as_str).unwrap_or(&ev.name) {
                 "response.output_item.done" => output.push(v["item"].clone()),
                 "response.completed" | "response.incomplete" => {
-                    final_response = Some(v["response"].clone())
+                    final_response = Some(v["response"].clone());
+                    break 'upstream;
                 }
-                "response.failed" => failure = Some(v["response"]["error"].clone()),
-                "error" => failure = Some(v.clone()),
+                "response.failed" => {
+                    failure = Some(v["response"]["error"].clone());
+                    break 'upstream;
+                }
+                "error" => {
+                    failure = Some(v.clone());
+                    break 'upstream;
+                }
                 _ => {}
             }
         }
@@ -394,7 +431,33 @@ pub(crate) fn max_tokens(req: &Value) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read as _, Write as _};
+
     use super::*;
+
+    async fn upstream(body: &str) -> reqwest::Response {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = body.to_string();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request);
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+        reqwest::Client::new()
+            .get(format!("http://{addr}"))
+            .send()
+            .await
+            .unwrap()
+    }
 
     #[test]
     fn model_routes_by_family() {
@@ -429,5 +492,33 @@ mod tests {
         assert_eq!(tool_def(&wrapped)["name"], json!("f"));
         let flat = json!({"name":"g"});
         assert_eq!(tool_def(&flat)["name"], json!("g"));
+    }
+
+    #[tokio::test]
+    async fn aggregate_rejects_stream_without_terminal_event() {
+        let response =
+            upstream("data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n")
+                .await;
+        let response = aggregate_response(Provider::Codex, "gpt-test".into(), response).await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("上游流在完成事件前结束"));
+    }
+
+    #[tokio::test]
+    async fn stream_does_not_fake_stop_after_truncated_upstream() {
+        let response =
+            upstream("data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n")
+                .await;
+        let response = stream_response(Provider::Codex, "gpt-test".into(), response, false);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8_lossy(&body);
+        assert!(body.contains("上游流在完成事件前结束"));
+        assert!(!body.contains("\"finish_reason\":\"stop\""));
+        assert!(body.ends_with("data: [DONE]\n\n"));
     }
 }

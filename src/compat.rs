@@ -259,7 +259,7 @@ fn denied(h: &HeaderMap, dialect: Dialect) -> Option<Response> {
         .or_else(|| {
             h.get(AUTHORIZATION)
                 .and_then(|v| v.to_str().ok())
-                .map(|v| v.strip_prefix("Bearer ").unwrap_or(v).trim())
+                .map(bearer_or_raw)
         });
     (got != Some(expect)).then(|| {
         dialect.error(
@@ -268,6 +268,14 @@ fn denied(h: &HeaderMap, dialect: Dialect) -> Option<Response> {
             "api key 无效: 与 JJ_PROXY_API_KEY 不一致",
         )
     })
+}
+
+fn bearer_or_raw(value: &str) -> &str {
+    let value = value.trim();
+    match value.split_once(' ') {
+        Some((scheme, token)) if scheme.eq_ignore_ascii_case("bearer") => token.trim(),
+        _ => value,
+    }
 }
 
 #[cfg(test)]
@@ -289,5 +297,12 @@ mod tests {
     fn any_key_accepted_without_env() {
         // 测试进程未设 JJ_PROXY_API_KEY -> 放行
         assert!(denied(&HeaderMap::new(), Dialect::OpenAI).is_none());
+    }
+
+    #[test]
+    fn bearer_scheme_is_case_insensitive() {
+        assert_eq!(bearer_or_raw("Bearer secret"), "secret");
+        assert_eq!(bearer_or_raw("bearer   secret "), "secret");
+        assert_eq!(bearer_or_raw("raw-secret"), "raw-secret");
     }
 }

@@ -65,9 +65,9 @@ jj-agentic-proxy logout all       # anthropic | codex | all
 
 ## 架构
 
-- 单进程 axum, 双端口共用一份凭证与连接池; 只监听 loopback, 无云端中转, 无请求落盘
+- 单进程 axum, 双端口共用一份凭证与连接池; 建连超时 20s / 读取空闲超时 300s; 只监听 loopback, 无云端中转, 无请求落盘
 - 认证: OAuth PKCE (S256); 回调端口被上游 client_id allow-list 写死 (Anthropic 54545 / Codex 1455), 登录时须空闲
-- 凭证: `auth.json` 原子写 + 0600; 到期前 300s 主动刷新, 每 provider 单飞锁; 上游 401 时强制续期并重试一次
+- 凭证: `auth.json` 进程间串行 + 原子写 + 0600; login/logout 热更新; 到期前 300s 主动刷新, 每 provider 单飞锁; 上游 401 时强制续期并重试一次
 - 原生端口: 注入 Bearer 与官方 CLI header, body 仅补齐上游硬要求 (Anthropic 的 Claude Code system 前缀 / Codex 的 `stream`+`store`+`instructions`), 显式传值不被覆盖
 - 兼容端口: Chat Completions 双向转换; 上游一律 SSE, 客户端要非流式时本层聚合 -> 只维护一条解析路径
 - CLI 渠道与官方 api key 渠道的差异由代理抹平: 上游硬拒 `stream:false` 与字符串 `input`, 代理补齐后再把 SSE 聚合成官方非流式对象

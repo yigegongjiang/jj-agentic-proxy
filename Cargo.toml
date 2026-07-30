@@ -1,6 +1,6 @@
 [package]
 name = "jj-agentic-proxy"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 rust-version = "1.82"
 description = "本机 agentic proxy: 复用自有订阅, 为其他 app 提供 Anthropic / OpenAI Codex 官方协议端点"
@@ -13,6 +13,7 @@ axum = { version = "0.8", default-features = false, features = ["http1", "http2"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+fs4 = { version = "1", default-features = false, features = ["sync"] }
 rand = "0.9"
 reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls",

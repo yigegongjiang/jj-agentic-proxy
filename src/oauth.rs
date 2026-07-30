@@ -134,7 +134,7 @@ impl From<AnthropicTokenResp> for Credential {
         Credential {
             access_token: r.access_token,
             refresh_token: r.refresh_token,
-            expires_at: now() + r.expires_in.unwrap_or(3600),
+            expires_at: now().saturating_add(r.expires_in.unwrap_or(3600)),
             account,
             account_id,
             plan: None,
@@ -239,7 +239,7 @@ impl From<CodexTokenResp> for Credential {
         Credential {
             access_token: r.access_token,
             refresh_token: r.refresh_token,
-            expires_at: now() + r.expires_in.unwrap_or(3600),
+            expires_at: now().saturating_add(r.expires_in.unwrap_or(3600)),
             account: claims
                 .as_ref()
                 .and_then(|c| c.get("email"))

@@ -202,10 +202,11 @@ fn parse_provider(name: &str) -> Result<Provider> {
     )
 }
 
-/// 无总超时: SSE 长连接不能被打断; 只约束建连与空闲。
+/// 无总超时: SSE 长连接不能被打断; 只约束建连与单次读取空闲。
 fn http_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(20))
+        .read_timeout(Duration::from_secs(300))
         .pool_idle_timeout(Duration::from_secs(90))
         .tcp_keepalive(Duration::from_secs(30))
         .build()
