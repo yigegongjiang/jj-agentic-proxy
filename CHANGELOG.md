@@ -14,6 +14,17 @@
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-31
+
+### Added
+
+- 新端口 `127.0.0.1:10012`: 同一份 Claude 订阅, 直连 Anthropic 官方 OpenAI 兼容接口 (OpenAI SDK / 客户端可直接指过来)
+- 10012 只提供 `/v1/chat/completions` 与模型列表; 需要原生 Anthropic 协议仍走 10011
+
+### Changed
+
+- `status` / 启动输出改列三个端口及其协议面
+
 ## [0.4.6] - 2026-07-31
 
 ### Added

@@ -17,7 +17,7 @@ use serde_json::{json, Map, Value};
 
 use crate::auth::AuthManager;
 use crate::convert;
-use crate::provider::{self, Provider};
+use crate::provider::{self, Provider, Surface};
 
 pub struct App {
     pub auth: Arc<AuthManager>,
@@ -26,24 +26,31 @@ pub struct App {
     pub session_id: String,
 }
 
-/// 一个端口 = 一个 provider: 请求打到哪个端口就决定走哪家上游。
+/// 一个端口 = 一个协议面: 请求打到哪个端口就决定走哪家上游、说哪套协议。
 #[derive(Clone)]
 pub struct Port {
     pub app: Arc<App>,
-    pub provider: Provider,
+    pub surface: Surface,
+}
+
+impl Port {
+    pub(crate) fn provider(&self) -> Provider {
+        self.surface.provider()
+    }
 }
 
 /// 该端口对外可用路径 (404 提示与 /health 共用一份)。
-pub(crate) fn endpoints(provider: Provider) -> &'static [&'static str] {
-    match provider {
-        Provider::Anthropic => &[
+pub(crate) fn endpoints(surface: Surface) -> &'static [&'static str] {
+    match surface {
+        Surface::ClaudeCode => &[
             "/v1/messages",
             "/v1/messages/count_tokens",
             "/v1/models",
             "/v1/chat/completions",
             "/health",
         ],
-        Provider::Codex => &[
+        Surface::ClaudeOpenAI => &["/v1/chat/completions", "/v1/models", "/health"],
+        Surface::Codex => &[
             "/v1/responses",
             "/v1/responses/compact",
             "/v1/models",
@@ -66,7 +73,8 @@ pub(crate) fn cors() -> tower_http::cors::CorsLayer {
 }
 
 pub(crate) async fn health(State(port): State<Port>) -> Response {
-    let p = port.provider;
+    let s = port.surface;
+    let p = port.provider();
     let login = match port.app.auth.snapshot(p).await {
         Some(c) => json!({
             "logged_in": true,
@@ -81,10 +89,11 @@ pub(crate) async fn health(State(port): State<Port>) -> Response {
         json!({
             "name": env!("CARGO_PKG_NAME"),
             "version": env!("CARGO_PKG_VERSION"),
+            "surface": s.key(),
             "provider": p.key(),
-            "port": p.port(),
+            "port": s.port(),
             "auth": login,
-            "endpoints": endpoints(p),
+            "endpoints": endpoints(s),
         }),
     )
 }
@@ -100,7 +109,12 @@ pub(crate) enum Dialect {
 
 impl Dialect {
     /// Anthropic 官方 SDK 一定带 `x-api-key` 或 `anthropic-version`; OpenAI 侧只有 Bearer。
-    pub(crate) fn of(h: &HeaderMap) -> Self {
+    ///
+    /// 纯 OpenAI 形状的端口不随客户端头摇摆: 该端口的存在意义就是只讲 OpenAI 方言。
+    pub(crate) fn of(surface: Surface, h: &HeaderMap) -> Self {
+        if surface != Surface::ClaudeCode {
+            return Dialect::OpenAI;
+        }
         let anthropic = ["x-api-key", "anthropic-version", "anthropic-beta"]
             .iter()
             .any(|k| h.contains_key(*k));
@@ -150,12 +164,12 @@ pub(crate) async fn handle(
     body: Bytes,
 ) -> Response {
     let path = uri.path().to_string();
-    let dialect = Dialect::of(&headers);
-    let Some(target) = resolve(port.provider, &path, uri.query()) else {
+    let dialect = Dialect::of(port.surface, &headers);
+    let Some(target) = resolve(port.surface, &path, uri.query()) else {
         return dialect.error(
             StatusCode::NOT_FOUND,
             "not_found",
-            &not_found_hint(port.provider, &path),
+            &not_found_hint(port.surface, &path),
         );
     };
 
@@ -164,7 +178,7 @@ pub(crate) async fn handle(
 
     let resp = match upstream(
         &port.app,
-        target.provider,
+        target.surface.provider(),
         method.clone(),
         &target.url,
         &headers,
@@ -179,7 +193,7 @@ pub(crate) async fn handle(
     };
     let status = resp.status();
     tracing::info!(
-        provider = %target.provider,
+        surface = %target.surface,
         %method,
         path = %path,
         status = status.as_u16(),
@@ -311,27 +325,28 @@ pub(crate) async fn upstream(
 
 #[derive(Debug, PartialEq, Eq)]
 struct Target {
-    provider: Provider,
+    surface: Surface,
     url: String,
     /// 上游路径 (不含 host / query), 用于判断是否需要 body 规范化。
     upstream_path: String,
 }
 
 /// 走错端口是端口拆分后最常见的误用 -> 直接给出正确端口, 不让客户端猜。
-fn not_found_hint(provider: Provider, path: &str) -> String {
-    let other = provider.other();
-    if resolve(other, path, None).is_some() {
-        format!(
-            "路径 {path} 属于 {other}, 请改用 http://{}:{}",
+fn not_found_hint(surface: Surface, path: &str) -> String {
+    let other = Surface::ALL
+        .into_iter()
+        .find(|&s| s != surface && resolve(s, path, None).is_some());
+    match other {
+        Some(s) => format!(
+            "路径 {path} 属于 {s}, 请改用 http://{}:{}",
             provider::HOST,
-            other.port()
-        )
-    } else {
-        format!(
-            "未支持的路径 {path}; {provider} 端口 ({}) 可用: {}",
-            provider.port(),
-            endpoints(provider).join(", ")
-        )
+            s.port()
+        ),
+        None => format!(
+            "未支持的路径 {path}; {surface} 端口 ({}) 可用: {}",
+            surface.port(),
+            endpoints(surface).join(", ")
+        ),
     }
 }
 
@@ -353,17 +368,24 @@ pub(crate) fn strip_v1(path: &str) -> &str {
     }
 }
 
-/// provider 由端口固定; path 只决定上游子路径, 不属于该 provider 的路径直接拒绝。
-fn resolve(provider: Provider, path: &str, query: Option<&str>) -> Option<Target> {
+/// 上游由端口固定; path 只决定上游子路径, 不属于该端口的路径直接拒绝。
+fn resolve(surface: Surface, path: &str, query: Option<&str>) -> Option<Target> {
     let p = strip_v1(path);
-    let (base, upstream_path) = match provider {
-        Provider::Anthropic => {
+    let (base, upstream_path) = match surface {
+        Surface::ClaudeCode => {
             let hit = ["/messages", "/models", "/complete"]
                 .iter()
                 .any(|pre| sub_path(p, pre).is_some());
             hit.then(|| (provider::ANTHROPIC_UPSTREAM, format!("/v1{p}")))?
         }
-        Provider::Codex => {
+        // 该端口只有 chat/completions 走上游 (`/models` 由端口层出 OpenAI 形状)。
+        Surface::ClaudeOpenAI => (p == "/chat/completions").then(|| {
+            (
+                provider::ANTHROPIC_UPSTREAM,
+                provider::ANTHROPIC_OPENAI_PATH.to_string(),
+            )
+        })?,
+        Surface::Codex => {
             let rest = match sub_path(p, "/responses") {
                 Some(_) => p.to_string(),
                 None => sub_path(path, "/backend-api/codex")?.to_string(),
@@ -378,7 +400,7 @@ fn resolve(provider: Provider, path: &str, query: Option<&str>) -> Option<Target
         url.push_str(q);
     }
     Some(Target {
-        provider,
+        surface,
         url,
         upstream_path,
     })
@@ -422,17 +444,25 @@ fn prepare_body(target: &Target, body: Bytes) -> (Bytes, Plan) {
     };
     let client_stream = obj.get("stream").and_then(Value::as_bool).unwrap_or(false);
 
-    let (changed, plan) = match target.provider {
+    let (changed, plan) = match target.surface {
         // OAuth 凭证只被授权用于 Claude Code, system 必须带 CLI 前缀。
-        Provider::Anthropic if target.upstream_path.starts_with("/v1/messages") => (
+        Surface::ClaudeCode if target.upstream_path.starts_with("/v1/messages") => (
             inject_claude_code_prefix(obj),
             Plan {
                 upstream_stream: client_stream,
                 aggregate_responses: false,
             },
         ),
+        // 官方兼容层把所有 system 消息拼成单块 -> 客户端的 system 必须挪出该通道。
+        Surface::ClaudeOpenAI => (
+            hoist_system_out_of_the_way(obj),
+            Plan {
+                upstream_stream: client_stream,
+                aggregate_responses: false,
+            },
+        ),
         // /codex/responses 只接受 SSE + 不落库 + instructions 必填 + input 必须是数组。
-        Provider::Codex if target.upstream_path == "/responses" => (
+        Surface::Codex if target.upstream_path == "/responses" => (
             normalize_codex(obj),
             Plan {
                 upstream_stream: true,
@@ -500,6 +530,60 @@ pub(crate) fn inject_claude_code_prefix(obj: &mut Map<String, Value>) -> bool {
             obj.insert("system".into(), other);
             false
         }
+    }
+}
+
+/// 客户端 system 文本挪进对话首条 user 消息, system 通道只留 CLI 前缀。
+///
+/// 官方 OpenAI 兼容层把所有 system / developer 消息按出现顺序用 `\n` 拼成**单块** system,
+/// 而 OAuth 凭证要求该块与 CLI 前缀逐字节相等 (多一个换行都被拒) ->
+/// 客户端只要带自己的 system, 整串请求必挂。挪走是唯一能同时保住两者的做法。
+fn hoist_system_out_of_the_way(obj: &mut Map<String, Value>) -> bool {
+    let Some(Value::Array(msgs)) = obj.get("messages") else {
+        return false;
+    };
+    let mut carried: Vec<String> = Vec::new();
+    let mut rest: Vec<Value> = Vec::with_capacity(msgs.len());
+    for m in msgs {
+        match m.get("role").and_then(Value::as_str) {
+            Some("system" | "developer") => {
+                let text = message_text(m);
+                // 前缀本身由本层重新插入, 不重复携带。
+                if !text.is_empty() && text != provider::CLAUDE_CODE_SYSTEM_PREFIX {
+                    carried.push(text);
+                }
+            }
+            _ => rest.push(m.clone()),
+        }
+    }
+
+    let mut out = Vec::with_capacity(rest.len() + 2);
+    out.push(json!({
+        "role": "system",
+        "content": provider::CLAUDE_CODE_SYSTEM_PREFIX,
+    }));
+    if !carried.is_empty() {
+        // 加标签: 让模型把这段当指令而非用户提问 (上游会与后续 user 消息合并成同一轮)。
+        out.push(json!({
+            "role": "user",
+            "content": format!("<system-instructions>\n{}\n</system-instructions>", carried.join("\n")),
+        }));
+    }
+    out.append(&mut rest);
+    obj.insert("messages".into(), Value::Array(out));
+    true
+}
+
+/// OpenAI 的 content 可以是字符串, 也可以是分块数组。
+fn message_text(m: &Value) -> String {
+    match m.get("content") {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Array(parts)) => parts
+            .iter()
+            .filter_map(|p| p.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
     }
 }
 
@@ -679,109 +763,134 @@ pub(crate) fn json_body(status: StatusCode, value: Value) -> Response {
 mod tests {
     use super::*;
 
-    fn resolved(provider: Provider, path: &str) -> Target {
-        resolve(provider, path, None).expect("路径应可解析")
+    fn resolved(surface: Surface, path: &str) -> Target {
+        resolve(surface, path, None).expect("路径应可解析")
     }
 
     #[test]
     fn both_base_url_conventions_route_the_same() {
         // Anthropic SDK: base = 域名根 -> /v1/messages
         assert_eq!(
-            resolved(Provider::Anthropic, "/v1/messages").url,
+            resolved(Surface::ClaudeCode, "/v1/messages").url,
             "https://api.anthropic.com/v1/messages"
         );
         // OpenAI SDK: base = .../v1 -> /chat 之外的路径不带 /v1
         assert_eq!(
-            resolved(Provider::Codex, "/responses").url,
+            resolved(Surface::Codex, "/responses").url,
             "https://chatgpt.com/backend-api/codex/responses"
         );
         assert_eq!(
-            resolved(Provider::Anthropic, "/models").url,
+            resolved(Surface::ClaudeCode, "/models").url,
             "https://api.anthropic.com/v1/models"
         );
         // base 误写成 .../v1 又被 SDK 再拼一次
         assert_eq!(
-            resolved(Provider::Anthropic, "/v1/v1/messages").url,
+            resolved(Surface::ClaudeCode, "/v1/v1/messages").url,
             "https://api.anthropic.com/v1/messages"
         );
+        // 兼容层端口: 两种 base url 写法都落到官方兼容路径
+        for p in ["/chat/completions", "/v1/chat/completions"] {
+            assert_eq!(
+                resolved(Surface::ClaudeOpenAI, p).url,
+                "https://api.anthropic.com/v1/chat/completions"
+            );
+        }
     }
 
     #[test]
     fn anthropic_paths_keep_shape() {
-        let t = resolved(Provider::Anthropic, "/v1/messages/count_tokens");
-        assert_eq!(t.provider, Provider::Anthropic);
+        let t = resolved(Surface::ClaudeCode, "/v1/messages/count_tokens");
+        assert_eq!(t.surface, Surface::ClaudeCode);
         assert_eq!(t.url, "https://api.anthropic.com/v1/messages/count_tokens");
         assert_eq!(
-            resolved(Provider::Anthropic, "/v1/models/claude-opus-5").url,
+            resolved(Surface::ClaudeCode, "/v1/models/claude-opus-5").url,
             "https://api.anthropic.com/v1/models/claude-opus-5"
         );
     }
 
     #[test]
     fn codex_paths_drop_v1_prefix() {
-        let t = resolved(Provider::Codex, "/v1/responses");
-        assert_eq!(t.provider, Provider::Codex);
+        let t = resolved(Surface::Codex, "/v1/responses");
+        assert_eq!(t.surface, Surface::Codex);
         assert_eq!(t.url, "https://chatgpt.com/backend-api/codex/responses");
         assert_eq!(t.upstream_path, "/responses");
 
         assert_eq!(
-            resolved(Provider::Codex, "/v1/responses/compact").url,
+            resolved(Surface::Codex, "/v1/responses/compact").url,
             "https://chatgpt.com/backend-api/codex/responses/compact"
         );
         assert_eq!(
-            resolved(Provider::Codex, "/backend-api/codex/usage").url,
+            resolved(Surface::Codex, "/backend-api/codex/usage").url,
             "https://chatgpt.com/backend-api/codex/usage"
         );
     }
 
     #[test]
-    fn each_port_only_serves_its_own_provider() {
-        // 一个端口 = 一个 provider: 另一家的路径在本端口不存在
-        assert!(resolve(Provider::Anthropic, "/v1/responses", None).is_none());
-        assert!(resolve(Provider::Codex, "/v1/messages", None).is_none());
-        assert!(resolve(Provider::Anthropic, "/backend-api/codex/usage", None).is_none());
+    fn each_port_only_serves_its_own_surface() {
+        // 一个端口 = 一个协议面: 别家的路径在本端口不存在
+        assert!(resolve(Surface::ClaudeCode, "/v1/responses", None).is_none());
+        assert!(resolve(Surface::Codex, "/v1/messages", None).is_none());
+        assert!(resolve(Surface::ClaudeCode, "/backend-api/codex/usage", None).is_none());
+        // 兼容层端口只有 chat/completions 走上游
+        assert!(resolve(Surface::ClaudeOpenAI, "/v1/messages", None).is_none());
+        assert!(resolve(Surface::ClaudeOpenAI, "/v1/models", None).is_none());
     }
 
     #[test]
     fn wrong_port_hint_points_at_the_right_one() {
-        let hint = not_found_hint(Provider::Anthropic, "/v1/responses");
+        let hint = not_found_hint(Surface::ClaudeCode, "/v1/responses");
         assert!(hint.contains("codex"), "{hint}");
         assert!(hint.contains("127.0.0.1:10010"), "{hint}");
 
-        let hint = not_found_hint(Provider::Codex, "/v1/messages");
+        let hint = not_found_hint(Surface::Codex, "/v1/messages");
         assert!(hint.contains("127.0.0.1:10011"), "{hint}");
 
-        // 两家都不认的路径 -> 列本端口可用路径
-        let hint = not_found_hint(Provider::Codex, "/embeddings");
+        // 原生 Messages 打到兼容层端口 -> 指回 10011
+        let hint = not_found_hint(Surface::ClaudeOpenAI, "/v1/messages");
+        assert!(hint.contains("127.0.0.1:10011"), "{hint}");
+
+        // 谁都不认的路径 -> 列本端口可用路径
+        let hint = not_found_hint(Surface::Codex, "/embeddings");
         assert!(hint.contains("/v1/responses"), "{hint}");
     }
 
     #[test]
     fn query_is_preserved_and_unknown_path_rejected() {
-        let t = resolve(Provider::Anthropic, "/v1/models", Some("limit=5")).unwrap();
+        let t = resolve(Surface::ClaudeCode, "/v1/models", Some("limit=5")).unwrap();
         assert_eq!(t.url, "https://api.anthropic.com/v1/models?limit=5");
-        // chat/completions 由 server 层接走, 不进透传
-        assert!(resolve(Provider::Anthropic, "/v1/chat/completions", None).is_none());
-        assert!(resolve(Provider::Codex, "/v1/chat/completions", None).is_none());
-        assert!(resolve(Provider::Codex, "/embeddings", None).is_none());
-        assert!(resolve(Provider::Anthropic, "/v1/messagesfoo", None).is_none());
+        // chat/completions 由 server 层接走, 不进透传 (兼容层端口除外)
+        assert!(resolve(Surface::ClaudeCode, "/v1/chat/completions", None).is_none());
+        assert!(resolve(Surface::Codex, "/v1/chat/completions", None).is_none());
+        assert!(resolve(Surface::Codex, "/embeddings", None).is_none());
+        assert!(resolve(Surface::ClaudeCode, "/v1/messagesfoo", None).is_none());
     }
 
     #[test]
-    fn dialect_follows_api_key_style() {
+    fn dialect_follows_api_key_style_only_on_the_anthropic_port() {
         let mut anthropic = HeaderMap::new();
         anthropic.insert("x-api-key", HeaderValue::from_static("sk-x"));
-        assert_eq!(Dialect::of(&anthropic), Dialect::Anthropic);
+        assert_eq!(
+            Dialect::of(Surface::ClaudeCode, &anthropic),
+            Dialect::Anthropic
+        );
 
         let mut openai = HeaderMap::new();
         openai.insert(AUTHORIZATION, HeaderValue::from_static("Bearer sk-x"));
-        assert_eq!(Dialect::of(&openai), Dialect::OpenAI);
-        assert_eq!(Dialect::of(&HeaderMap::new()), Dialect::OpenAI);
+        assert_eq!(Dialect::of(Surface::ClaudeCode, &openai), Dialect::OpenAI);
+        assert_eq!(
+            Dialect::of(Surface::ClaudeCode, &HeaderMap::new()),
+            Dialect::OpenAI
+        );
+
+        // 纯 OpenAI 形状的端口不随客户端头摇摆
+        for s in [Surface::Codex, Surface::ClaudeOpenAI] {
+            assert_eq!(Dialect::of(s, &anthropic), Dialect::OpenAI);
+        }
     }
 
     #[test]
     fn claude_code_prefix_injected_once() {
-        let t = resolved(Provider::Anthropic, "/v1/messages");
+        let t = resolved(Surface::ClaudeCode, "/v1/messages");
 
         let (body, plan) = prepare_body(&t, Bytes::from(r#"{"model":"m","stream":true}"#));
         let v: Value = serde_json::from_slice(&body).unwrap();
@@ -801,7 +910,7 @@ mod tests {
     /// 客户端 (Claude Code CLI / Agent SDK) 用 1h 缓存时, 注入块若带默认 5m 会被上游按 ttl 顺序拒绝。
     #[test]
     fn injected_prefix_carries_no_cache_control() {
-        let t = resolved(Provider::Anthropic, "/v1/messages");
+        let t = resolved(Surface::ClaudeCode, "/v1/messages");
         let client = r#"{"system":[
             {"type":"text","text":"billing"},
             {"type":"text","text":"big prompt","cache_control":{"type":"ephemeral","ttl":"1h"}}
@@ -819,7 +928,7 @@ mod tests {
 
     #[test]
     fn string_system_is_promoted_to_blocks() {
-        let t = resolved(Provider::Anthropic, "/v1/messages");
+        let t = resolved(Surface::ClaudeCode, "/v1/messages");
         let (body, _) = prepare_body(&t, Bytes::from(r#"{"system":"be brief"}"#));
         let v: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(
@@ -829,9 +938,82 @@ mod tests {
         assert_eq!(v["system"][1]["text"].as_str().unwrap(), "be brief");
     }
 
+    /// 官方兼容层拼接后的 system 必须与 CLI 前缀逐字节相等 -> 客户端 system 一律挪走。
+    #[test]
+    fn compat_port_keeps_system_channel_prefix_only() {
+        let t = resolved(Surface::ClaudeOpenAI, "/v1/chat/completions");
+        let raw = r#"{"model":"m","messages":[
+            {"role":"system","content":"Be terse."},
+            {"role":"user","content":"hi"},
+            {"role":"assistant","content":"yo"},
+            {"role":"developer","content":[{"type":"text","text":"Answer in French."}]},
+            {"role":"user","content":"again"}
+        ]}"#;
+        let (body, plan) = prepare_body(&t, Bytes::from(raw));
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        let msgs = v["messages"].as_array().unwrap();
+
+        // system 通道只剩前缀本身
+        assert_eq!(msgs[0]["role"], json!("system"));
+        assert_eq!(
+            msgs[0]["content"],
+            json!(provider::CLAUDE_CODE_SYSTEM_PREFIX)
+        );
+        assert!(msgs
+            .iter()
+            .skip(1)
+            .all(|m| m["role"] != json!("system") && m["role"] != json!("developer")));
+
+        // 客户端 system 文本按原顺序合并进一条前置 user 消息
+        let carried = msgs[1]["content"].as_str().unwrap();
+        assert_eq!(msgs[1]["role"], json!("user"));
+        assert!(
+            carried.contains("Be terse.\nAnswer in French."),
+            "{carried}"
+        );
+
+        // 其余对话原样保留, 顺序不变
+        assert_eq!(msgs[2]["content"], json!("hi"));
+        assert_eq!(msgs[3]["content"], json!("yo"));
+        assert_eq!(msgs[4]["content"], json!("again"));
+        // 上游支持 stream:false -> 无需本层聚合
+        assert!(!plan.upstream_stream);
+        assert!(!plan.aggregate_responses);
+    }
+
+    /// 客户端没给 system 时上游同样会拒 -> 前缀必须无条件补上, 且不产生空的挟带消息。
+    #[test]
+    fn compat_port_injects_prefix_even_without_client_system() {
+        let t = resolved(Surface::ClaudeOpenAI, "/v1/chat/completions");
+        let (body, _) = prepare_body(
+            &t,
+            Bytes::from(
+                r#"{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}"#,
+            ),
+        );
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        let msgs = v["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(
+            msgs[0]["content"],
+            json!(provider::CLAUDE_CODE_SYSTEM_PREFIX)
+        );
+        assert_eq!(msgs[1]["content"], json!("hi"));
+    }
+
+    /// 反复经过本层 (客户端回传上一轮消息) 不得叠加前缀。
+    #[test]
+    fn compat_port_rewrite_is_idempotent() {
+        let t = resolved(Surface::ClaudeOpenAI, "/v1/chat/completions");
+        let raw = r#"{"messages":[{"role":"system","content":"Be terse."},{"role":"user","content":"hi"}]}"#;
+        let (once, _) = prepare_body(&t, Bytes::from(raw));
+        let (twice, _) = prepare_body(&t, once.clone());
+        assert_eq!(once, twice);
+    }
+
     #[test]
     fn codex_body_meets_upstream_hard_requirements() {
-        let t = resolved(Provider::Codex, "/v1/responses");
+        let t = resolved(Surface::Codex, "/v1/responses");
         let (body, plan) = prepare_body(&t, Bytes::from(r#"{"model":"m","input":"hi"}"#));
         let v: Value = serde_json::from_slice(&body).unwrap();
         // 上游只接受 SSE + 数组 input; 客户端没要流式 -> 由本层聚合
@@ -856,7 +1038,7 @@ mod tests {
     /// 官方 Responses API 的默认 store:true 与纯标注参数, 上游一律 400 -> 本层抹平。
     #[test]
     fn codex_drops_params_upstream_rejects() {
-        let t = resolved(Provider::Codex, "/v1/responses");
+        let t = resolved(Surface::Codex, "/v1/responses");
         let raw = r#"{"model":"m","input":[],"store":true,"max_output_tokens":64,
             "metadata":{"a":"b"},"user":"u","safety_identifier":"s","temperature":1}"#;
         let (body, _) = prepare_body(&t, Bytes::from(raw));
@@ -871,7 +1053,7 @@ mod tests {
 
     #[test]
     fn compact_subresource_is_untouched() {
-        let t = resolved(Provider::Codex, "/v1/responses/compact");
+        let t = resolved(Surface::Codex, "/v1/responses/compact");
         let raw = r#"{"model":"m"}"#;
         let (body, plan) = prepare_body(&t, Bytes::from(raw));
         assert_eq!(body, Bytes::from(raw));
@@ -910,7 +1092,7 @@ mod tests {
 
     #[test]
     fn non_json_body_passes_through() {
-        let t = resolved(Provider::Anthropic, "/v1/messages");
+        let t = resolved(Surface::ClaudeCode, "/v1/messages");
         let raw = Bytes::from_static(b"not json");
         let (body, plan) = prepare_body(&t, raw.clone());
         assert_eq!(body, raw);

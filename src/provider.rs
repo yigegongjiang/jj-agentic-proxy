@@ -26,21 +26,6 @@ impl Provider {
         }
     }
 
-    /// 一个 provider 一个固定端口, 不可配置 -> 客户端 base url 永远可写死。
-    pub const fn port(self) -> u16 {
-        match self {
-            Provider::Codex => 10010,
-            Provider::Anthropic => 10011,
-        }
-    }
-
-    pub const fn other(self) -> Self {
-        match self {
-            Provider::Anthropic => Provider::Codex,
-            Provider::Codex => Provider::Anthropic,
-        }
-    }
-
     /// 接受官方名与常用别名。
     pub fn parse(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
@@ -52,6 +37,53 @@ impl Provider {
 }
 
 impl fmt::Display for Provider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.key())
+    }
+}
+
+/// 一个端口 = 一个协议面。凭证按 provider 复用: 10011 / 10012 共用同一份 Anthropic 凭证。
+///
+/// 端口固定不可配置 -> 客户端 base url 永远可写死。
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum Surface {
+    /// 10010: Codex 原生 (OpenAI Responses)
+    Codex,
+    /// 10011: Anthropic 原生 (Messages)
+    ClaudeCode,
+    /// 10012: Anthropic 官方 OpenAI 兼容层直通
+    ClaudeOpenAI,
+}
+
+impl Surface {
+    pub const ALL: [Surface; 3] = [Surface::Codex, Surface::ClaudeCode, Surface::ClaudeOpenAI];
+
+    pub const fn key(self) -> &'static str {
+        match self {
+            Surface::Codex => "codex",
+            Surface::ClaudeCode => "claude-code",
+            Surface::ClaudeOpenAI => "claude-openai",
+        }
+    }
+
+    pub const fn port(self) -> u16 {
+        match self {
+            Surface::Codex => 10010,
+            Surface::ClaudeCode => 10011,
+            Surface::ClaudeOpenAI => 10012,
+        }
+    }
+
+    /// 该端口用哪份凭证 / 走哪家上游。
+    pub const fn provider(self) -> Provider {
+        match self {
+            Surface::Codex => Provider::Codex,
+            Surface::ClaudeCode | Surface::ClaudeOpenAI => Provider::Anthropic,
+        }
+    }
+}
+
+impl fmt::Display for Surface {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.key())
     }
@@ -71,6 +103,8 @@ pub const ANTHROPIC_OAUTH_BETA: &str = "oauth-2025-04-20";
 /// OAuth 凭证只被授权用于 Claude Code, system 第一块必须带此前缀, 否则上游 403。
 pub const CLAUDE_CODE_SYSTEM_PREFIX: &str =
     "You are Claude Code, Anthropic's official CLI for Claude.";
+/// Anthropic 官方 OpenAI 兼容层 (同域, 由上游自己做协议转换)。
+pub const ANTHROPIC_OPENAI_PATH: &str = "/v1/chat/completions";
 
 pub fn anthropic_redirect_uri() -> String {
     format!("http://localhost:{ANTHROPIC_CALLBACK_PORT}{ANTHROPIC_CALLBACK_PATH}")

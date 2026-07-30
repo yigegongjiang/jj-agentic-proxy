@@ -8,7 +8,7 @@
 
 # jj-agentic-proxy
 
-本机 agentic proxy: 复用自有订阅 (Claude Pro / ChatGPT Plus), 经 Web OAuth 取 token, 以官方 CLI 身份把 Codex 能力暴露在 `127.0.0.1:10010`、Claude Code 能力暴露在 `127.0.0.1:10011`.
+本机 agentic proxy: 复用自有订阅 (Claude Pro / ChatGPT Plus), 经 Web OAuth 取 token, 以官方 CLI 身份把 Codex 能力暴露在 `127.0.0.1:10010`、Claude Code 能力暴露在 `127.0.0.1:10011` (原生 Anthropic) 与 `127.0.0.1:10012` (Anthropic 官方 OpenAI 兼容层).
 
 ## 安装
 
@@ -24,7 +24,7 @@ curl -fsSL https://raw.githubusercontent.com/yigegongjiang/jj-agentic-proxy/mast
 ```bash
 jj-agentic-proxy login anthropic  # 浏览器授权; token 落 ~/.config/jj-agentic-proxy/auth.json (0600)
 jj-agentic-proxy login codex      # 同上
-jj-agentic-proxy                  # = start, 后台常驻 (codex 10010 + claude-code 10011)
+jj-agentic-proxy                  # = start, 后台常驻 (10010 + 10011 + 10012)
 jj-agentic-proxy stop             # 停止; 重启 = stop + start
 jj-agentic-proxy status           # 运行中/未运行 + 凭证账号 / 套餐 / 到期
 jj-agentic-proxy logout all       # anthropic | codex | all
@@ -33,15 +33,17 @@ jj-agentic-proxy logout all       # anthropic | codex | all
 - 后台常驻: 脱离终端 (关掉 shell 不影响), 日志落 `~/.config/jj-agentic-proxy/daemon.log`
 - 重复 `start` 不会起第二个实例; 端口被占用时 start 直接失败并回显日志尾部
 
-## 端口 (一个 provider 一个端口)
+## 端口 (一个端口一个协议面)
 
 <!-- prettier-ignore -->
-| 端口 | provider | 上游 | 协议 |
-| --- | --- | --- | --- |
-| 10010 | codex | `chatgpt.com/backend-api/codex` | OpenAI Responses + Chat Completions |
-| 10011 | claude-code | `api.anthropic.com` | Anthropic Messages + Chat Completions |
+| 端口 | 协议面 | 订阅 | 上游 | 协议 |
+| --- | --- | --- | --- | --- |
+| 10010 | codex | ChatGPT | `chatgpt.com/backend-api/codex` | OpenAI Responses + Chat Completions (本地转换) |
+| 10011 | claude-code | Claude | `api.anthropic.com/v1/messages` | Anthropic Messages + Chat Completions (本地转换) |
+| 10012 | claude-openai | Claude | `api.anthropic.com/v1/chat/completions` | OpenAI Chat Completions (上游官方兼容层) |
 
 - 端口写死在二进制里, 无任何 host / port 参数: base url 一次写死, 换机器不用改
+- 10011 与 10012 同一份 Claude 订阅凭证, 只是协议转换发生在本地还是上游
 - 请求打到哪个端口就走哪家订阅, 与 model 名无关; 路径走错端口时 404 直接给出正确端口
 - base url 两家官方写法都通: `http://127.0.0.1:10011` (Anthropic SDK 约定) 与 `http://127.0.0.1:10011/v1` (OpenAI SDK 约定)
 - api key 填任意非空值即可 (官方 SDK 会本地校验非空); 代理不校验它, 上游身份一律用本机 OAuth 凭证
@@ -52,33 +54,35 @@ jj-agentic-proxy logout all       # anthropic | codex | all
 <!-- prettier-ignore -->
 | 端点 | 端口 | 上游 | 协议 |
 | --- | --- | --- | --- |
-| `POST /v1/chat/completions` | 两者 | 按端口定 | OpenAI Chat Completions |
-| `GET /v1/models`, `/v1/models/{id}` | 两者 | 按端口定 | 见下 |
+| `POST /v1/chat/completions` | 全部 | 按端口定 | OpenAI Chat Completions |
+| `GET /v1/models`, `/v1/models/{id}` | 全部 | 按端口定 | 见下 |
 | `POST /v1/messages` | 10011 | `api.anthropic.com/v1/messages` | Anthropic Messages |
 | `POST /v1/messages/count_tokens` | 10011 | `api.anthropic.com` 同路径 | Anthropic Messages |
 | `POST /v1/responses` | 10010 | `chatgpt.com/backend-api/codex/responses` | OpenAI Responses |
 | `POST /v1/responses/compact` | 10010 | 上游 `/responses/compact` | OpenAI Responses |
 | `ANY /backend-api/codex/*` | 10010 | `chatgpt.com` 同路径 | Codex 原生逃生口 |
-| `GET /health` | 两者 | — | 本端口 provider + 登录状态 + 可用路径 |
+| `GET /health` | 全部 | — | 本端口协议面 + 登录状态 + 可用路径 |
 
 - Chat Completions 的上游由端口决定, `model` 只取模型名 (允许 `anthropic/`、`openai/` 前缀)
-- 覆盖: 流式 / 非流式、tools + 工具结果回传、图片 (url 与 data URI)、`response_format`、`reasoning_effort`; 思考内容出 `reasoning_content`
+- 10010 / 10011 本地转换覆盖: 流式 / 非流式、tools + 工具结果回传、图片 (url 与 data URI)、`response_format`、`reasoning_effort`; 思考内容出 `reasoning_content`
 - 10011 的 Chat Completions 丢弃采样参数 (`temperature` / `top_p` / `top_k`): 上游新模型一律硬拒, 转发必然 400; `reasoning_effort` 映射成上游现行思考档位
-- `/v1/models` 形状: 10011 带 `x-api-key` / `anthropic-version` -> Anthropic 官方原样; 其余 (含 10010) -> OpenAI 列表, 只含本端口 provider 的模型
+- 10012 只有 Chat Completions 与模型列表 (原生 Messages 走 10011), 字段支持度以[上游兼容层](https://platform.claude.com/docs/en/api/openai-sdk)为准: 无 `reasoning_content`, `response_format` / `reasoning_effort` / `seed` 等被上游静默忽略, `temperature` 上限 1
+- `/v1/models` 形状: 10011 带 `x-api-key` / `anthropic-version` -> Anthropic 官方原样; 其余 (含 10010 / 10012) -> OpenAI 列表, 只含本端口订阅的模型
 - 错误一律按方言裹官方信封 (`{"type":"error",...}` / `{"error":{...}}`); 上游已给官方形状则原样透传, 保留 `request-id` 等头
 - 额度查 `10010/backend-api/codex/usage`
 
 ## 架构
 
-- 单进程 axum, 两端口共用一份凭证与连接池; 建连超时 20s / 读取空闲超时 300s; 只监听 loopback, 无云端中转, 无请求落盘
-- 启动时先 bind 两个端口再对外服务: 端口被占用立刻整体失败, 不留「只有一半能用」的中间态
+- 单进程 axum, 三端口共用凭证与连接池; 建连超时 20s / 读取空闲超时 300s; 只监听 loopback, 无云端中转, 无请求落盘
+- 启动时先 bind 三个端口再对外服务: 端口被占用立刻整体失败, 不留「只有一部分能用」的中间态
 - 单实例: `daemon.pid` 独占文件锁, 锁由内核在进程退出时释放 -> 判活不受 pid 复用 / 残留 pid 文件影响
 - `start` 拉起后台进程后等它写下就绪标记才报成功 (不靠「端口通」, 避免把别人占的端口认成自己); `stop` = SIGTERM -> 等锁释放 -> 5s 未退则 SIGKILL
 - 后台日志单文件 8MB 上限, 满则轮转一份 -> 磁盘占用恒定, 不随运行时长增长
 - 认证: OAuth PKCE (S256); 回调端口被上游 client_id allow-list 写死 (Anthropic 54545 / Codex 1455), 登录时须空闲
 - 凭证: `auth.json` 进程间串行 + 原子写 + 0600; login/logout 热更新; 到期前 300s 主动刷新, 每 provider 单飞锁; 上游 401 时强制续期并重试一次
-- 原生路径: 注入 Bearer 与官方 CLI header, body 只做上游硬要求的最小改写
-  - Anthropic: system 首块补 Claude Code 前缀 (不带 `cache_control`, 不占客户端的缓存断点、不打乱 ttl 顺序)
+- 透传路径: 注入 Bearer 与官方 CLI header, body 只做上游硬要求的最小改写
+  - Anthropic 原生: system 首块补 Claude Code 前缀 (不带 `cache_control`, 不占客户端的缓存断点、不打乱 ttl 顺序)
+  - Anthropic 兼容层: 上游把所有 system / developer 消息拼成单块 system, 而 OAuth 凭证要求该块与 CLI 前缀逐字节相等 -> 客户端 system 文本挪进对话首条 user 消息 (`<system-instructions>` 包裹), system 通道只留前缀
   - Codex: 补 `stream`+`instructions`, 强制 `store:false`, 丢弃上游不认的纯标注参数 (`metadata` / `user` / `safety_identifier` / token 上限)
   - 有语义的参数 (`temperature` / `previous_response_id` / `background` / ...) 不静默丢弃, 由上游报错并归一成官方信封
 - Chat Completions: 双向转换; 上游一律 SSE, 客户端要非流式时本层聚合 -> 只维护一条解析路径
@@ -90,17 +94,17 @@ jj-agentic-proxy logout all       # anthropic | codex | all
 ## 结构
 
 ```
-src/main.rs               CLI (start / stop / login / logout / status) + 两个固定端口 + 优雅退出
+src/main.rs               CLI (start / stop / login / logout / status) + 三个固定端口 + 优雅退出
 src/daemon.rs             后台常驻: 单实例锁 + 探活 + 启停 + 日志封顶
 src/server.rs             端口层: Chat Completions + 模型列表, 其余落透传
-src/proxy.rs              透传: provider 由端口定 + header 注入 + body 规范化 + 带凭证请求上游
+src/proxy.rs              透传: 上游由端口定 + header 注入 + body 规范化 + 带凭证请求上游
 src/convert/mod.rs        Chat Completions 增量模型 + 流式回传 / 非流式聚合
 src/convert/codex.rs      Chat Completions <-> OpenAI Responses
 src/convert/anthropic.rs  Chat Completions <-> Anthropic Messages
 src/sse.rs                SSE 解码
 src/auth.rs               凭证内存态 + 到期预判 + 单飞刷新
 src/oauth.rs              PKCE + 本机回调服务 + 两家 token 换取/刷新
-src/provider.rs           两家上游常量 (固定端口 / client_id / endpoint / CLI 冒充参数)
+src/provider.rs           协议面 <-> 端口 / 订阅映射 + 两家上游常量 (client_id / endpoint / CLI 冒充参数)
 src/store.rs              auth.json 读写 (原子 + 0600)
 scripts/install.sh        使用者一键安装 (GitHub Releases -> ~/.local/bin)
 scripts/install-local.sh  本机 release 构建 + 安装 (预部署)

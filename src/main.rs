@@ -20,7 +20,7 @@ use rand::RngCore as _;
 use tracing_subscriber::EnvFilter;
 
 use crate::auth::AuthManager;
-use crate::provider::Provider;
+use crate::provider::{Provider, Surface};
 use crate::store::now;
 
 #[derive(Parser)]
@@ -93,19 +93,23 @@ async fn serve() -> Result<()> {
 
     // 先全部 bind 再 serve: 端口被占用要立刻失败, 不留半个可用端口的中间态。
     let mut bound = Vec::new();
-    for p in Provider::ALL {
-        bound.push((p, bind(p.port()).await?));
+    for s in Surface::ALL {
+        bound.push((s, bind(s.port()).await?));
     }
 
     let mut tasks = Vec::new();
-    for (p, listener) in bound {
-        tracing::info!("{p:<9} listening on http://{}:{}", provider::HOST, p.port());
+    for (s, listener) in bound {
+        tracing::info!(
+            "{s:<13} listening on http://{}:{}",
+            provider::HOST,
+            s.port()
+        );
         let port = proxy::Port {
             app: app.clone(),
-            provider: p,
+            surface: s,
         };
         tasks.push((
-            p,
+            s,
             tokio::spawn(
                 axum::serve(listener, server::router(port))
                     .with_graceful_shutdown(shutdown())
@@ -116,10 +120,10 @@ async fn serve() -> Result<()> {
 
     daemon::mark_ready(&mut instance)?;
 
-    for (p, task) in tasks {
+    for (s, task) in tasks {
         task.await
-            .with_context(|| format!("{p} 端口任务异常"))?
-            .with_context(|| format!("{p} 端口服务异常退出"))?;
+            .with_context(|| format!("{s} 端口任务异常"))?
+            .with_context(|| format!("{s} 端口服务异常退出"))?;
     }
     Ok(())
 }
@@ -185,8 +189,8 @@ fn status() -> Result<()> {
     match daemon::running()? {
         Some(pid) => {
             println!("运行中 (pid {pid})");
-            for p in Provider::ALL {
-                println!("- {p:<11} http://{}:{}", provider::HOST, p.port());
+            for s in Surface::ALL {
+                println!("- {s:<13} http://{}:{}", provider::HOST, s.port());
             }
             println!("日志: {}", daemon::log_path().display());
         }

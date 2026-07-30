@@ -19,7 +19,7 @@ use axum::Router;
 use serde_json::{json, Value};
 
 use crate::convert;
-use crate::provider::{self, Provider};
+use crate::provider::{self, Provider, Surface};
 use crate::proxy::{self, json_body, App, Dialect, Port};
 use crate::store::now;
 
@@ -38,16 +38,17 @@ async fn dispatch(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let dialect = Dialect::of(&headers);
+    let surface = state.surface;
+    let dialect = Dialect::of(surface, &headers);
     let path = proxy::strip_v1(uri.path());
-    // Anthropic 方言在 claude 端口落回透传 -> 拿到官方原样形状;
-    // codex 上游 `/models` 不是官方 OpenAI 形状 -> 该端口一律由本层出列表。
-    let openai_list =
-        method == Method::GET && (dialect == Dialect::OpenAI || state.provider == Provider::Codex);
+    // Anthropic 方言在 claude-code 端口落回透传 -> 拿到官方原样形状; 其余端口只讲 OpenAI。
+    let openai_list = method == Method::GET && dialect == Dialect::OpenAI;
+    // claude-openai 端口的 chat/completions 由 Anthropic 官方兼容层出结果 -> 落透传。
+    let local_chat = method == Method::POST && surface != Surface::ClaudeOpenAI;
 
     match path {
         "/health" => proxy::health(state).await,
-        "/chat/completions" if method == Method::POST => chat_completions(state, body).await,
+        "/chat/completions" if local_chat => chat_completions(state, body).await,
         "/models" if openai_list => openai_models(state).await,
         p if openai_list && p.starts_with("/models/") => {
             openai_model(state, &p["/models/".len()..]).await
@@ -60,7 +61,7 @@ async fn dispatch(
 
 /// provider 由端口定, model 只取名字 (允许 `openai/`、`anthropic/` 前缀)。
 async fn chat_completions(State(port): State<Port>, body: Bytes) -> Response {
-    let p = port.provider;
+    let p = port.provider();
     let bad = |msg: &str| Dialect::OpenAI.error(StatusCode::BAD_REQUEST, "invalid_request", msg);
     let Ok(req) = serde_json::from_slice::<Value>(&body) else {
         return bad("请求体不是合法 JSON");
@@ -135,7 +136,7 @@ async fn chat_completions(State(port): State<Port>, body: Bytes) -> Response {
 // ---------- 模型列表 (OpenAI 方言) ----------
 
 async fn openai_models(State(port): State<Port>) -> Response {
-    let data = list(&port.app, port.provider).await;
+    let data = list(&port.app, port.provider()).await;
     json_body(StatusCode::OK, json!({ "object": "list", "data": data }))
 }
 
@@ -143,7 +144,7 @@ async fn openai_model(State(port): State<Port>, id: &str) -> Response {
     let Some(name) = convert::model_name(id) else {
         return Dialect::OpenAI.error(StatusCode::NOT_FOUND, "not_found", "model 不存在");
     };
-    match list(&port.app, port.provider)
+    match list(&port.app, port.provider())
         .await
         .into_iter()
         .find(|m| m["id"] == name)
@@ -152,7 +153,7 @@ async fn openai_model(State(port): State<Port>, id: &str) -> Response {
         None => Dialect::OpenAI.error(
             StatusCode::NOT_FOUND,
             "not_found",
-            &format!("model `{id}` 不在 {} 端口的可用列表中", port.provider),
+            &format!("model `{id}` 不在 {} 端口的可用列表中", port.surface),
         ),
     }
 }
