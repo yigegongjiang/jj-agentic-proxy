@@ -14,6 +14,22 @@
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-07-31
+
+### Added
+
+- `start` / `stop`: 后台常驻启停, 关掉终端不影响运行; 重启 = `stop` + `start`
+- `status` 增加运行状态 (运行中 + pid / 未运行) 与日志路径
+
+### Changed
+
+- 无参数运行 = `start` (后台常驻), 不再占用终端; 重复 start 不会起第二个实例
+- 日志落 `~/.config/jj-agentic-proxy/daemon.log`, 单文件 8MB 满则轮转一份 (占用不随运行时长增长)
+
+### Removed
+
+- 去掉 `help` 子命令: 用 `-h`
+
 ## [0.4.5] - 2026-07-31
 
 ### Removed

@@ -2,6 +2,7 @@
 
 mod auth;
 mod convert;
+mod daemon;
 mod oauth;
 mod provider;
 mod proxy;
@@ -26,7 +27,8 @@ use crate::store::now;
 #[command(
     name = "jj-agentic-proxy",
     version,
-    about = "本机 agentic proxy: 复用自有订阅, 为其他 app 提供 Anthropic / OpenAI Codex 官方协议端点"
+    about = "本机 agentic proxy: 复用自有订阅, 为其他 app 提供 Anthropic / OpenAI Codex 官方协议端点",
+    disable_help_subcommand = true
 )]
 struct Cli {
     #[command(subcommand)]
@@ -35,20 +37,27 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// 启动代理 (默认命令): codex 10010 + claude-code 10011, 端口固定
+    /// 启动 (默认命令): 后台常驻, codex 10010 + claude-code 10011, 端口固定
+    Start,
+    /// 停止
+    Stop,
+    /// 后台进程本体, 由 start 拉起 (不直接使用)
+    #[command(hide = true)]
     Serve,
     /// Web OAuth 授权: anthropic | codex
     Login { provider: String },
     /// 删除本地凭证: anthropic | codex | all
     Logout { provider: String },
-    /// 查看本地凭证状态
+    /// 查看运行与凭证状态
     Status,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    match cli.cmd.unwrap_or(Cmd::Serve) {
+    match cli.cmd.unwrap_or(Cmd::Start) {
+        Cmd::Start => daemon::start(),
+        Cmd::Stop => daemon::stop(),
         Cmd::Serve => serve().await,
         Cmd::Login { provider } => login(&provider).await,
         Cmd::Logout { provider } => logout(&provider),
@@ -58,11 +67,9 @@ async fn main() -> Result<()> {
 
 /// 一个 provider 一个固定端口 -> 客户端 base url 写死即可, 无需任何参数。
 async fn serve() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
+    init_tracing()?;
+    // 独占 pid 锁 -> 第二个实例立刻失败, 且 stop / status 能凭内核锁准确判活。
+    let mut instance = daemon::acquire()?;
 
     let http = http_client()?;
     let auth = AuthManager::load(http.clone())?;
@@ -107,10 +114,30 @@ async fn serve() -> Result<()> {
         ));
     }
 
+    daemon::mark_ready(&mut instance)?;
+
     for (p, task) in tasks {
         task.await
             .with_context(|| format!("{p} 端口任务异常"))?
             .with_context(|| format!("{p} 端口服务异常退出"))?;
+    }
+    Ok(())
+}
+
+/// 前台 -> stderr; 后台 (由 `start` 注入日志路径) -> 封顶日志文件, 无 ANSI。
+fn init_tracing() -> Result<()> {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    match std::env::var(daemon::LOG_ENV) {
+        Ok(path) if !path.is_empty() => {
+            let log = daemon::CappedLog::open(path.clone().into())
+                .with_context(|| format!("打开日志失败: {path}"))?;
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_ansi(false)
+                .with_writer(std::sync::Mutex::new(log))
+                .init();
+        }
+        _ => tracing_subscriber::fmt().with_env_filter(filter).init(),
     }
     Ok(())
 }
@@ -155,6 +182,16 @@ fn logout(name: &str) -> Result<()> {
 }
 
 fn status() -> Result<()> {
+    match daemon::running()? {
+        Some(pid) => {
+            println!("运行中 (pid {pid})");
+            for p in Provider::ALL {
+                println!("- {p:<11} http://{}:{}", provider::HOST, p.port());
+            }
+            println!("日志: {}", daemon::log_path().display());
+        }
+        None => println!("未运行 (`jj-agentic-proxy start` 后台启动)"),
+    }
     let store = store::load()?;
     println!("store: {}", store::auth_path().display());
     for p in Provider::ALL {

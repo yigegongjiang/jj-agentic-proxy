@@ -24,10 +24,14 @@ curl -fsSL https://raw.githubusercontent.com/yigegongjiang/jj-agentic-proxy/mast
 ```bash
 jj-agentic-proxy login anthropic  # 浏览器授权; token 落 ~/.config/jj-agentic-proxy/auth.json (0600)
 jj-agentic-proxy login codex      # 同上
-jj-agentic-proxy                  # = serve, 固定 codex 10010 + claude-code 10011
-jj-agentic-proxy status           # 凭证账号 / 套餐 / 到期
+jj-agentic-proxy                  # = start, 后台常驻 (codex 10010 + claude-code 10011)
+jj-agentic-proxy stop             # 停止; 重启 = stop + start
+jj-agentic-proxy status           # 运行中/未运行 + 凭证账号 / 套餐 / 到期
 jj-agentic-proxy logout all       # anthropic | codex | all
 ```
+
+- 后台常驻: 脱离终端 (关掉 shell 不影响), 日志落 `~/.config/jj-agentic-proxy/daemon.log`
+- 重复 `start` 不会起第二个实例; 端口被占用时 start 直接失败并回显日志尾部
 
 ## 端口 (一个 provider 一个端口)
 
@@ -67,7 +71,10 @@ jj-agentic-proxy logout all       # anthropic | codex | all
 ## 架构
 
 - 单进程 axum, 两端口共用一份凭证与连接池; 建连超时 20s / 读取空闲超时 300s; 只监听 loopback, 无云端中转, 无请求落盘
-- 启动时先 bind 两个端口再 serve: 端口被占用立刻整体失败, 不留「只有一半能用」的中间态
+- 启动时先 bind 两个端口再对外服务: 端口被占用立刻整体失败, 不留「只有一半能用」的中间态
+- 单实例: `daemon.pid` 独占文件锁, 锁由内核在进程退出时释放 -> 判活不受 pid 复用 / 残留 pid 文件影响
+- `start` 拉起后台进程后等它写下就绪标记才报成功 (不靠「端口通」, 避免把别人占的端口认成自己); `stop` = SIGTERM -> 等锁释放 -> 5s 未退则 SIGKILL
+- 后台日志单文件 8MB 上限, 满则轮转一份 -> 磁盘占用恒定, 不随运行时长增长
 - 认证: OAuth PKCE (S256); 回调端口被上游 client_id allow-list 写死 (Anthropic 54545 / Codex 1455), 登录时须空闲
 - 凭证: `auth.json` 进程间串行 + 原子写 + 0600; login/logout 热更新; 到期前 300s 主动刷新, 每 provider 单飞锁; 上游 401 时强制续期并重试一次
 - 原生路径: 注入 Bearer 与官方 CLI header, body 只做上游硬要求的最小改写
@@ -83,7 +90,8 @@ jj-agentic-proxy logout all       # anthropic | codex | all
 ## 结构
 
 ```
-src/main.rs               CLI (serve / login / logout / status) + 两个固定端口 + 优雅退出
+src/main.rs               CLI (start / stop / login / logout / status) + 两个固定端口 + 优雅退出
+src/daemon.rs             后台常驻: 单实例锁 + 探活 + 启停 + 日志封顶
 src/server.rs             端口层: Chat Completions + 模型列表, 其余落透传
 src/proxy.rs              透传: provider 由端口定 + header 注入 + body 规范化 + 带凭证请求上游
 src/convert/mod.rs        Chat Completions 增量模型 + 流式回传 / 非流式聚合
