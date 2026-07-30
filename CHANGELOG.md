@@ -14,9 +14,14 @@
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-07-30
+
 ### Added
 
-- 本机代理端点: 复用自有订阅为 Claude Code / Codex 提供服务
-- `login` 命令: 通过 Web OAuth 授权并在本地保存 token
+- 本机代理: 其他 app 指向 `127.0.0.1:10000` 即可用自有订阅调用 Anthropic Messages 与 OpenAI Codex Responses
+- `login` / `logout` / `status`: 浏览器授权, 凭证存本机并可随时查看到期时间
+- 凭证到期前自动续期, 上游拒绝时自动重试一次, 无需手工介入
+- 流式回答逐块透传, 首字延迟与官方 CLI 一致
 
 [Unreleased]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/yigegongjiang/jj-agentic-proxy/releases/tag/v0.1.0
