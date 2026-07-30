@@ -512,6 +512,11 @@ fn drop_sampling_params(obj: &mut Map<String, Value>) -> bool {
     changed
 }
 
+/// system **首块**必须与 Claude Code 前缀逐字节相等, 否则 OAuth 凭证被拒。
+///
+/// 上游只认首块且只认全等 (实测): 前缀与正文挤在同一块、多一个尾随换行、
+/// 前缀排在后面的块里, 一律不算数 (报成 429 `rate_limit_error`, 极易误判为限流)。
+/// 首块之后的块不受限制 -> 客户端自己的 system 内容原样保留。
 pub(crate) fn inject_claude_code_prefix(obj: &mut Map<String, Value>) -> bool {
     // 不带 cache_control: 客户端自己的 breakpoint 才是权威。
     // 注入一个 5m 块会插在客户端的 1h 块之前 -> 上游按 ttl 顺序硬拒 (400), 且白占一个 breakpoint。
@@ -519,42 +524,32 @@ pub(crate) fn inject_claude_code_prefix(obj: &mut Map<String, Value>) -> bool {
         "type": "text",
         "text": provider::CLAUDE_CODE_SYSTEM_PREFIX,
     });
-    let has_prefix = |v: &Value| {
-        v.get("text")
-            .and_then(Value::as_str)
-            .is_some_and(|t| t.contains(provider::CLAUDE_CODE_SYSTEM_PREFIX))
-    };
 
-    match obj.remove("system") {
-        None => {
-            obj.insert("system".into(), json!([prefix]));
-            true
-        }
-        Some(Value::String(s)) => {
-            if s.contains(provider::CLAUDE_CODE_SYSTEM_PREFIX) {
-                obj.insert("system".into(), Value::String(s));
-                false
-            } else {
-                obj.insert(
-                    "system".into(),
-                    json!([prefix, { "type": "text", "text": s }]),
-                );
-                true
-            }
-        }
-        Some(Value::Array(mut blocks)) => {
-            let hit = blocks.iter().any(has_prefix);
-            if !hit {
-                blocks.insert(0, prefix);
-            }
-            obj.insert("system".into(), Value::Array(blocks));
-            !hit
-        }
+    let original = obj.remove("system");
+    let was_blocks = matches!(original, Some(Value::Array(_)));
+    let mut blocks = match original {
+        None => Vec::new(),
+        // 字符串 system = 单块 -> 统一成块数组后按同一条规则处理。
+        Some(Value::String(s)) => vec![json!({ "type": "text", "text": s })],
+        Some(Value::Array(blocks)) => blocks,
+        // 形状本身非法 -> 原样交给上游报错, 不猜。
         Some(other) => {
             obj.insert("system".into(), other);
-            false
+            return false;
         }
+    };
+
+    let gated = blocks
+        .first()
+        .and_then(|b| b.get("text"))
+        .and_then(Value::as_str)
+        == Some(provider::CLAUDE_CODE_SYSTEM_PREFIX);
+    if !gated {
+        blocks.insert(0, prefix);
     }
+    obj.insert("system".into(), Value::Array(blocks));
+    // 本就是合规块数组 -> 无实质改动, 原始 body 可直接透传。
+    !gated || !was_blocks
 }
 
 /// 客户端 system 文本挪进对话首条 user 消息, system 通道只留 CLI 前缀。
@@ -948,6 +943,63 @@ mod tests {
         assert!(v["system"][0].get("cache_control").is_none());
         // 客户端自己的 breakpoint 原样保留
         assert_eq!(v["system"][2]["cache_control"]["ttl"], json!("1h"));
+    }
+
+    /// 上游只认「首块全等」: 前缀出现在别处都不算数, 必须另补首块。
+    /// 实测这三种写法直接被拒 (伪装成 429 `rate_limit_error`)。
+    #[test]
+    fn prefix_must_be_the_whole_first_block() {
+        let t = resolved(Surface::ClaudeCode, "/v1/messages");
+        let pre = provider::CLAUDE_CODE_SYSTEM_PREFIX;
+        let cases = [
+            // 前缀与正文挤在同一块
+            json!([{ "type": "text", "text": format!("{pre}\n\nBe terse.") }]),
+            // 前缀排在后面的块里
+            json!([
+                { "type": "text", "text": "Be terse." },
+                { "type": "text", "text": pre },
+            ]),
+            // 首块多一个尾随换行
+            json!([{ "type": "text", "text": format!("{pre}\n") }]),
+        ];
+        for system in cases {
+            let raw = json!({ "model": "m", "system": system }).to_string();
+            let (body, _) = prepare_body(&t, Bytes::from(raw));
+            let v: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(v["system"][0]["text"], json!(pre), "首块未补齐: {system}");
+            // 客户端原有的块一个不少地顺延
+            assert_eq!(
+                v["system"].as_array().unwrap().len(),
+                system.as_array().unwrap().len() + 1
+            );
+        }
+    }
+
+    /// 字符串 system 同样是单块: 含前缀但不止前缀时必须拆成两块。
+    #[test]
+    fn string_system_containing_the_prefix_is_still_split() {
+        let t = resolved(Surface::ClaudeCode, "/v1/messages");
+        let pre = provider::CLAUDE_CODE_SYSTEM_PREFIX;
+        let raw = json!({ "system": format!("{pre}\n\nBe terse.") }).to_string();
+        let (body, _) = prepare_body(&t, Bytes::from(raw));
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["system"][0]["text"], json!(pre));
+        assert_eq!(v["system"][1]["text"], json!(format!("{pre}\n\nBe terse.")));
+    }
+
+    /// 首块已严格合规 -> 一个字节都不动 (客户端的缓存断点与块顺序全部保留)。
+    #[test]
+    fn compliant_system_is_passed_through_untouched() {
+        let t = resolved(Surface::ClaudeCode, "/v1/messages");
+        let raw = json!({
+            "system": [
+                { "type": "text", "text": provider::CLAUDE_CODE_SYSTEM_PREFIX },
+                { "type": "text", "text": "Be terse." },
+            ],
+        })
+        .to_string();
+        let (body, _) = prepare_body(&t, Bytes::from(raw.clone()));
+        assert_eq!(body, Bytes::from(raw));
     }
 
     #[test]
