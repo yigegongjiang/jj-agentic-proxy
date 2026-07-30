@@ -14,6 +14,13 @@
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-07-31
+
+### Removed
+
+- 去掉 `JJ_PROXY_CODEX_CLI_VERSION`: 上报版本号一律跟随本机 codex CLI 自动更新, 无需手工覆盖
+- 可配置项收敛为 `JJ_PROXY_API_KEY` + `RUST_LOG` 两个
+
 ## [0.4.2] - 2026-07-31
 
 ### Removed
@@ -97,7 +104,8 @@
 - 凭证到期前自动续期, 上游拒绝时自动重试一次, 无需手工介入
 - 流式回答逐块透传, 首字延迟与官方 CLI 一致
 
-[Unreleased]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.4.3...HEAD
+[0.4.3]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.3.2...v0.4.0

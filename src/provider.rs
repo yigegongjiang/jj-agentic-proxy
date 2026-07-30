@@ -106,15 +106,12 @@ pub fn codex_redirect_uri() -> String {
 /// 兜底常量只是下限, 会随时间失效, 因此优先跟随本机 codex CLI 自报的最新版本。
 const CODEX_CLI_VERSION_FLOOR: &str = "0.146.0";
 
-/// 优先级: `JJ_PROXY_CODEX_CLI_VERSION` > 本机 codex CLI 版本 > 内置下限。
+/// 优先级: 本机 codex CLI 版本 > 内置下限 (仅 version.json 读取失败时兜底)。
 pub fn codex_cli_version() -> String {
     static VERSION: OnceLock<String> = OnceLock::new();
     VERSION
         .get_or_init(|| {
-            std::env::var("JJ_PROXY_CODEX_CLI_VERSION")
-                .ok()
-                .or_else(local_codex_version)
-                .unwrap_or_else(|| CODEX_CLI_VERSION_FLOOR.to_string())
+            local_codex_version().unwrap_or_else(|| CODEX_CLI_VERSION_FLOOR.to_string())
         })
         .clone()
 }

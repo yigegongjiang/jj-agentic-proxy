@@ -77,7 +77,7 @@ jj-agentic-proxy logout all       # anthropic | codex | all
 - CLI 渠道与官方 api key 渠道的差异由代理抹平: 上游硬拒 `stream:false` 与字符串 `input`, 代理补齐后再把 SSE 聚合成官方非流式对象
 - 响应逐块转发不缓冲 -> SSE 首字延迟与官方 CLI 一致; 请求体无大小上限
 - 上游按 Codex CLI 版本 gate 新模型: 版本号跟随本机 `~/.codex/version.json` 自动更新, 内置常量只作下限
-- env: `JJ_PROXY_API_KEY` 开启 key 校验, `JJ_PROXY_CODEX_CLI_VERSION` 覆盖上报的 Codex 版本, `RUST_LOG` 调日志
+- env: `JJ_PROXY_API_KEY` 开启本机端口的 key 校验, `RUST_LOG` 调日志
 
 ## 结构
 
