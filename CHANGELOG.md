@@ -14,6 +14,22 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-31
+
+### Fixed
+
+- 按 OpenAI 官方写法把 base url 配成 `.../v1` 时全部 404; 现在两家写法都通
+- 用 Anthropic 客户端取模型列表拿到的是 OpenAI 形状; 现在按客户端各给官方形状
+- 不要流式的 OpenAI Responses 请求会返回一串流; 现在返回官方非流式结果对象
+
+### Added
+
+- 允许跨域: 浏览器内的网页可直接连本代理
+
+### Changed
+
+- 代理自身的报错改用客户端所用协议的官方错误信封
+
 ## [0.2.0] - 2026-07-30
 
 ### Added
@@ -32,6 +48,7 @@
 - 凭证到期前自动续期, 上游拒绝时自动重试一次, 无需手工介入
 - 流式回答逐块透传, 首字延迟与官方 CLI 一致
 
-[Unreleased]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/yigegongjiang/jj-agentic-proxy/releases/tag/v0.3.0
 [0.2.0]: https://github.com/yigegongjiang/jj-agentic-proxy/releases/tag/v0.2.0
 [0.1.0]: https://github.com/yigegongjiang/jj-agentic-proxy/releases/tag/v0.1.0

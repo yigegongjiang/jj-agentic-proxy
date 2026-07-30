@@ -255,6 +255,59 @@ pub async fn aggregate_response(
     )
 }
 
+// ---------- 非流式: 聚合成官方 Responses 对象 ----------
+
+/// 上游硬拒 `stream:false`, 但官方 Responses API 非流式返回 response 对象。
+/// 上游的 `response.completed` 里 `output` 恒为空, 只能从流式 item 重建。
+pub async fn aggregate_responses(upstream: reqwest::Response) -> Response {
+    let mut dec = sse::Decoder::default();
+    let mut bytes = Box::pin(upstream.bytes_stream());
+    let mut output: Vec<Value> = Vec::new();
+    let mut final_response: Option<Value> = None;
+    let mut failure: Option<Value> = None;
+
+    while let Some(item) = bytes.next().await {
+        let raw = match item {
+            Ok(b) => b,
+            Err(e) => {
+                return json_body(
+                    StatusCode::BAD_GATEWAY,
+                    json!({ "error": { "message": e.to_string(), "type": "api_error" } }),
+                )
+            }
+        };
+        dec.push(&raw);
+        while let Some(ev) = dec.next_event() {
+            let Ok(v) = serde_json::from_str::<Value>(&ev.data) else {
+                continue;
+            };
+            match v.get("type").and_then(Value::as_str).unwrap_or(&ev.name) {
+                "response.output_item.done" => output.push(v["item"].clone()),
+                "response.completed" | "response.incomplete" => {
+                    final_response = Some(v["response"].clone())
+                }
+                "response.failed" => failure = Some(v["response"]["error"].clone()),
+                "error" => failure = Some(v.clone()),
+                _ => {}
+            }
+        }
+    }
+
+    if let Some(e) = failure {
+        return json_body(StatusCode::BAD_GATEWAY, json!({ "error": e }));
+    }
+    match final_response {
+        Some(mut r) => {
+            r["output"] = Value::Array(output);
+            json_body(StatusCode::OK, r)
+        }
+        None => json_body(
+            StatusCode::BAD_GATEWAY,
+            json!({ "error": { "message": "上游流未给出完整 response", "type": "api_error" } }),
+        ),
+    }
+}
+
 // ---------- 组装 ----------
 
 fn delta_value(d: &Delta) -> Option<Value> {

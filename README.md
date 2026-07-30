@@ -29,7 +29,9 @@ jj-agentic-proxy logout all       # anthropic | codex | all
 | 10001 兼容 | 按 api key 方式调用的业务 | 按 model 转换 | 任意值 |
 
 - 兼容端口 = 原生端口的超集: 多了 `/v1/chat/completions` 与合并模型列表, 其余路径行为一致 -> 业务 base url 全指 `http://127.0.0.1:10001` 即可
-- 兼容端口忽略 api key 的值; 设了 `JJ_PROXY_API_KEY` 才校验 (值需与 `x-api-key` 或 `Authorization: Bearer` 一致)
+- base url 两家官方写法都通: `http://127.0.0.1:10001` (Anthropic SDK 约定) 与 `http://127.0.0.1:10001/v1` (OpenAI SDK 约定)
+- api key 填任意非空值即可 (官方 SDK 会本地校验非空); 设了 `JJ_PROXY_API_KEY` 才真的比对
+- 全放开 CORS: 浏览器页面可直连, 预检由代理直接应答
 - `--compat-port 0` 关闭兼容端口
 
 ## 端点
@@ -38,10 +40,9 @@ jj-agentic-proxy logout all       # anthropic | codex | all
 | 端点 | 端口 | 上游 | 协议 |
 | --- | --- | --- | --- |
 | `POST /v1/chat/completions` | 10001 | 按 model 定 | OpenAI Chat Completions |
-| `GET /v1/models` | 10001 | 两家合并 | OpenAI 列表格式 |
+| `GET /v1/models` | 两者 | 见下 | Anthropic 原样 / OpenAI 合并列表 |
 | `POST /v1/messages` | 两者 | `api.anthropic.com/v1/messages` | Anthropic Messages |
 | `POST /v1/messages/count_tokens` | 两者 | `api.anthropic.com` 同路径 | Anthropic Messages |
-| `GET /v1/models` | 10000 | `api.anthropic.com/v1/models` | Anthropic |
 | `POST /v1/responses` | 两者 | `chatgpt.com/backend-api/codex/responses` | OpenAI Responses |
 | `POST /v1/responses/compact` | 两者 | 上游 `/responses/compact` | OpenAI Responses |
 | `ANY /backend-api/codex/*` | 两者 | `chatgpt.com` 同路径 | Codex 原生逃生口 |
@@ -49,6 +50,8 @@ jj-agentic-proxy logout all       # anthropic | codex | all
 
 - Chat Completions 的 model 决定上游: `claude*` -> Anthropic Messages, 其余 -> Codex Responses; 允许 `anthropic/`、`openai/` 前缀
 - 覆盖: 流式 / 非流式、tools + 工具结果回传、图片 (url 与 data URI)、`response_format`、`reasoning_effort`; 思考内容出 `reasoning_content`
+- `/v1/models` 在 10001 按客户端方言给形状: 带 `x-api-key` / `anthropic-version` -> Anthropic 官方原样; 否则 -> OpenAI 列表 (两家合并); 10000 恒为 Anthropic 原样
+- 代理自产的错误也按方言裹官方信封 (`{"type":"error",...}` / `{"error":{...}}`)
 - 额度查 `/backend-api/codex/usage`
 
 ## 架构
@@ -58,6 +61,7 @@ jj-agentic-proxy logout all       # anthropic | codex | all
 - 凭证: `auth.json` 原子写 + 0600; 到期前 300s 主动刷新, 每 provider 单飞锁; 上游 401 时强制续期并重试一次
 - 原生端口: 注入 Bearer 与官方 CLI header, body 仅补齐上游硬要求 (Anthropic 的 Claude Code system 前缀 / Codex 的 `stream`+`store`+`instructions`), 显式传值不被覆盖
 - 兼容端口: Chat Completions 双向转换; 上游一律 SSE, 客户端要非流式时本层聚合 -> 只维护一条解析路径
+- CLI 渠道与官方 api key 渠道的差异由代理抹平: 上游硬拒 `stream:false` 与字符串 `input`, 代理补齐后再把 SSE 聚合成官方非流式对象
 - 响应逐块转发不缓冲 -> SSE 首字延迟与官方 CLI 一致; 请求体无大小上限
 - 上游按 Codex CLI 版本 gate 新模型: 版本号跟随本机 `~/.codex/version.json` 自动更新, 内置常量只作下限
 - env: `JJ_PROXY_API_KEY` 开启 key 校验, `JJ_PROXY_CODEX_CLI_VERSION` / `JJ_PROXY_CLAUDE_CLI_VERSION` 覆盖冒充版本, `JJ_PROXY_CONFIG_DIR` 改凭证目录, `RUST_LOG` 调日志

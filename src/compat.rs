@@ -1,7 +1,11 @@
-//! api key 兼容端口: 业务按官方 api key 方式调用 -> proxy 转成 CLI (OAuth) 渠道。
+//! api key 兼容端口: 业务按官方 api key 方式调用 -> proxy 换成 CLI (OAuth) 渠道。
 //!
-//! 与原生端口的区别只有两点: 认可 api key 风格鉴权 + 提供 Chat Completions / 合并模型列表。
-//! 其余路径原样落回原生透传, 所以业务把 base url 全指到本端口即可。
+//! 客户端全程以为自己在直连官方付费 api, 因此:
+//! - 两家 base url 约定 (域名根 / `.../v1`) 都要通 -> 路径先归一
+//! - 同一个 `/models` 按客户端方言给各自的官方形状
+//! - 自产错误也按方言裹官方信封
+//!
+//! 其余路径落回原生透传, 业务把 base url 全指本端口即可。
 
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
@@ -11,66 +15,62 @@ use axum::extract::{DefaultBodyLimit, State};
 use axum::http::header::AUTHORIZATION;
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::Response;
-use axum::routing::{any, get, post};
+use axum::routing::any;
 use axum::Router;
 use serde_json::{json, Value};
 
 use crate::convert;
 use crate::provider::{self, Provider};
-use crate::proxy::{self, json_body, App};
+use crate::proxy::{self, json_body, App, Dialect};
 use crate::store::now;
 
 pub fn router(app: Arc<App>) -> Router {
     Router::new()
-        .route("/v1/chat/completions", post(chat_completions))
-        .route("/v1/models", get(models))
-        .route("/health", any(proxy::health))
-        .fallback(any(passthrough))
+        .fallback(any(dispatch))
         .layer(DefaultBodyLimit::disable())
+        .layer(proxy::cors())
         .with_state(app)
 }
 
-/// 非 Chat Completions 的路径 = 官方原生协议, 直接复用透传层。
-async fn passthrough(
+async fn dispatch(
     state: State<Arc<App>>,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if let Some(r) = denied(&headers) {
+    let dialect = Dialect::of(&headers);
+    if let Some(r) = denied(&headers, dialect) {
         return r;
     }
-    proxy::handle(state, method, uri, headers, body).await
+    let path = proxy::strip_v1(uri.path());
+    let openai_get = dialect == Dialect::OpenAI && method == Method::GET;
+
+    match path {
+        "/health" => proxy::health(state).await,
+        "/chat/completions" if method == Method::POST => chat_completions(state, body).await,
+        // Anthropic 方言的 /models 落回透传 -> 拿到的是官方原样形状
+        "/models" if openai_get => openai_models(state).await,
+        p if openai_get && p.starts_with("/models/") => {
+            openai_model(state, &p["/models/".len()..]).await
+        }
+        _ => proxy::handle(state, method, uri, headers, body).await,
+    }
 }
 
 // ---------- Chat Completions ----------
 
-async fn chat_completions(
-    State(app): State<Arc<App>>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    if let Some(r) = denied(&headers) {
-        return r;
-    }
+async fn chat_completions(State(app): State<Arc<App>>, body: Bytes) -> Response {
+    let bad = |msg: &str| Dialect::OpenAI.error(StatusCode::BAD_REQUEST, "invalid_request", msg);
     let Ok(req) = serde_json::from_slice::<Value>(&body) else {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request_error",
-            "请求体不是合法 JSON",
-        );
+        return bad("请求体不是合法 JSON");
     };
     let Some((p, model)) = req
         .get("model")
         .and_then(Value::as_str)
         .and_then(convert::route)
     else {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request_error",
-            "model 必填; 可用取值见 GET /v1/models",
-        );
+        return bad("model 必填; 可用取值见 GET /v1/models");
     };
     let model = model.to_string();
     let want_stream = req.get("stream").and_then(Value::as_bool).unwrap_or(false);
@@ -86,9 +86,9 @@ async fn chat_completions(
     let upstream_body = match serde_json::to_vec(&convert::request(p, &req, &model)) {
         Ok(b) => Bytes::from(b),
         Err(e) => {
-            return error(
+            return Dialect::OpenAI.error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "proxy_error",
+                "upstream",
                 &e.to_string(),
             )
         }
@@ -104,6 +104,7 @@ async fn chat_completions(
         &HeaderMap::new(),
         upstream_body,
         true,
+        Dialect::OpenAI,
     )
     .await
     {
@@ -130,7 +131,7 @@ async fn chat_completions(
     }
 }
 
-/// 上游错误统一裹成 OpenAI 错误信封, 保留原始文案。
+/// 上游错误裹成 OpenAI 信封, 保留原始文案。
 async fn upstream_error(resp: reqwest::Response) -> Response {
     let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let raw = resp.bytes().await.unwrap_or_default();
@@ -142,41 +143,83 @@ async fn upstream_error(resp: reqwest::Response) -> Response {
                 .find_map(|p| v.pointer(p).and_then(Value::as_str).map(str::to_string))
         })
         .unwrap_or_else(|| String::from_utf8_lossy(&raw).into_owned());
-    json_body(
-        status,
-        json!({ "error": { "message": msg, "type": "upstream_error", "code": status.as_u16() } }),
-    )
+    // 4xx 是请求本身的问题, 归 invalid_request; 5xx 才是 api_error。
+    let kind = match status.as_u16() {
+        401 | 403 => "authentication",
+        404 => "not_found",
+        400..=499 => "invalid_request",
+        _ => "upstream",
+    };
+    Dialect::OpenAI.error(status, kind, &msg)
 }
 
-// ---------- 模型列表 ----------
+// ---------- 模型列表 (OpenAI 方言) ----------
 
-async fn models(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
-    if let Some(r) = denied(&headers) {
-        return r;
-    }
-    let (anthropic, codex) = tokio::join!(anthropic_models(&app), codex_models(&app));
+async fn openai_models(State(app): State<Arc<App>>) -> Response {
+    let (anthropic, codex) =
+        tokio::join!(list(&app, Provider::Anthropic), list(&app, Provider::Codex));
     let data: Vec<Value> = anthropic.into_iter().chain(codex).collect();
     json_body(StatusCode::OK, json!({ "object": "list", "data": data }))
 }
 
-async fn anthropic_models(app: &App) -> Vec<Value> {
-    let url = format!("{}/v1/models?limit=1000", provider::ANTHROPIC_UPSTREAM);
-    let Some(v) = fetch_json(app, Provider::Anthropic, &url).await else {
-        return vec![];
+async fn openai_model(State(app): State<Arc<App>>, id: &str) -> Response {
+    let Some((p, name)) = convert::route(id) else {
+        return Dialect::OpenAI.error(StatusCode::NOT_FOUND, "not_found", "model 不存在");
     };
-    entries(&v, "data", "id", "anthropic")
+    match list(&app, p).await.into_iter().find(|m| m["id"] == name) {
+        Some(m) => json_body(StatusCode::OK, m),
+        None => Dialect::OpenAI.error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            &format!("model `{id}` 不在可用列表中"),
+        ),
+    }
 }
 
-async fn codex_models(app: &App) -> Vec<Value> {
-    let url = format!(
-        "{}/models?client_version={}",
-        provider::CODEX_UPSTREAM,
-        provider::codex_cli_version()
-    );
-    let Some(v) = fetch_json(app, Provider::Codex, &url).await else {
-        return vec![];
+/// 单家取不到不影响另一家 -> 列表尽力而为。
+async fn list(app: &App, p: Provider) -> Vec<Value> {
+    let (url, list_key, id_key, owner) = match p {
+        Provider::Anthropic => (
+            format!("{}/v1/models?limit=1000", provider::ANTHROPIC_UPSTREAM),
+            "data",
+            "id",
+            "anthropic",
+        ),
+        Provider::Codex => (
+            format!(
+                "{}/models?client_version={}",
+                provider::CODEX_UPSTREAM,
+                provider::codex_cli_version()
+            ),
+            "models",
+            "slug",
+            "openai",
+        ),
     };
-    entries(&v, "models", "slug", "openai")
+    let sent = proxy::upstream(
+        app,
+        p,
+        Method::GET,
+        &url,
+        &HeaderMap::new(),
+        Bytes::new(),
+        false,
+        Dialect::OpenAI,
+    )
+    .await;
+    let body = match sent {
+        Ok(r) if r.status().is_success() => r.json::<Value>().await.ok(),
+        Ok(r) => {
+            tracing::warn!(provider = %p, status = r.status().as_u16(), "模型列表获取失败");
+            None
+        }
+        Err(_) => {
+            tracing::warn!(provider = %p, "模型列表跳过: 未登录或上游异常");
+            None
+        }
+    };
+    body.map(|v| entries(&v, list_key, id_key, owner))
+        .unwrap_or_default()
 }
 
 fn entries(v: &Value, list_key: &str, id_key: &str, owner: &str) -> Vec<Value> {
@@ -195,31 +238,6 @@ fn entries(v: &Value, list_key: &str, id_key: &str, owner: &str) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-/// 单家取不到不影响另一家 -> 列表尽力而为。
-async fn fetch_json(app: &App, p: Provider, url: &str) -> Option<Value> {
-    match proxy::upstream(
-        app,
-        p,
-        Method::GET,
-        url,
-        &HeaderMap::new(),
-        Bytes::new(),
-        false,
-    )
-    .await
-    {
-        Ok(r) if r.status().is_success() => r.json::<Value>().await.ok(),
-        Ok(r) => {
-            tracing::warn!(provider = %p, status = r.status().as_u16(), "模型列表获取失败");
-            None
-        }
-        Err(_) => {
-            tracing::warn!(provider = %p, "模型列表跳过: 未登录或上游异常");
-            None
-        }
-    }
-}
-
 // ---------- api key ----------
 
 /// 未设 `JJ_PROXY_API_KEY` 时接受任意 key (本机 loopback 已是边界)。
@@ -233,7 +251,7 @@ fn expected_key() -> Option<&'static str> {
     .as_deref()
 }
 
-fn denied(h: &HeaderMap) -> Option<Response> {
+fn denied(h: &HeaderMap, dialect: Dialect) -> Option<Response> {
     let expect = expected_key()?;
     let got = h
         .get("x-api-key")
@@ -244,19 +262,12 @@ fn denied(h: &HeaderMap) -> Option<Response> {
                 .map(|v| v.strip_prefix("Bearer ").unwrap_or(v).trim())
         });
     (got != Some(expect)).then(|| {
-        error(
+        dialect.error(
             StatusCode::UNAUTHORIZED,
-            "authentication_error",
-            "api key 无效",
+            "authentication",
+            "api key 无效: 与 JJ_PROXY_API_KEY 不一致",
         )
     })
-}
-
-fn error(status: StatusCode, kind: &str, message: &str) -> Response {
-    json_body(
-        status,
-        json!({ "error": { "message": message, "type": kind, "code": status.as_u16() } }),
-    )
 }
 
 #[cfg(test)]
@@ -277,6 +288,6 @@ mod tests {
     #[test]
     fn any_key_accepted_without_env() {
         // 测试进程未设 JJ_PROXY_API_KEY -> 放行
-        assert!(denied(&HeaderMap::new()).is_none());
+        assert!(denied(&HeaderMap::new(), Dialect::OpenAI).is_none());
     }
 }
