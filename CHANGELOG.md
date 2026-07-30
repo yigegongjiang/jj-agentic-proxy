@@ -14,6 +14,13 @@
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-07-31
+
+### Removed
+
+- 去掉 `JJ_PROXY_API_KEY`: 客户端填的 api key 一律不校验 (只监听本机, 使用者即本人), 填任意非空值即可
+- 至此无任何自定义配置项, 开箱即用
+
 ## [0.4.4] - 2026-07-31
 
 ### Fixed
@@ -111,7 +118,9 @@
 - 凭证到期前自动续期, 上游拒绝时自动重试一次, 无需手工介入
 - 流式回答逐块透传, 首字延迟与官方 CLI 一致
 
-[Unreleased]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.4.3...HEAD
+[Unreleased]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.4.5...HEAD
+[0.4.5]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.4.4...v0.4.5
+[0.4.4]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.4.0...v0.4.1

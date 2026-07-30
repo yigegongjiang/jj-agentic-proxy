@@ -7,12 +7,11 @@
 //!
 //! 本层只接 Chat Completions 与模型列表, 其余路径落回原生透传。
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Instant;
 
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, State};
-use axum::http::header::AUTHORIZATION;
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::Response;
 use axum::routing::any;
@@ -40,9 +39,6 @@ async fn dispatch(
     body: Bytes,
 ) -> Response {
     let dialect = Dialect::of(&headers);
-    if let Some(r) = denied(&headers, dialect) {
-        return r;
-    }
     let path = proxy::strip_v1(uri.path());
     // Anthropic 方言在 claude 端口落回透传 -> 拿到官方原样形状;
     // codex 上游 `/models` 不是官方 OpenAI 形状 -> 该端口一律由本层出列表。
@@ -234,46 +230,6 @@ fn entries(v: &Value, list_key: &str, id_key: &str, owner: &str) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-// ---------- api key ----------
-
-/// 未设 `JJ_PROXY_API_KEY` 时接受任意 key (本机 loopback 已是边界)。
-fn expected_key() -> Option<&'static str> {
-    static KEY: OnceLock<Option<String>> = OnceLock::new();
-    KEY.get_or_init(|| {
-        std::env::var("JJ_PROXY_API_KEY")
-            .ok()
-            .filter(|s| !s.is_empty())
-    })
-    .as_deref()
-}
-
-fn denied(h: &HeaderMap, dialect: Dialect) -> Option<Response> {
-    let expect = expected_key()?;
-    let got = h
-        .get("x-api-key")
-        .and_then(|v| v.to_str().ok())
-        .or_else(|| {
-            h.get(AUTHORIZATION)
-                .and_then(|v| v.to_str().ok())
-                .map(bearer_or_raw)
-        });
-    (got != Some(expect)).then(|| {
-        dialect.error(
-            StatusCode::UNAUTHORIZED,
-            "authentication",
-            "api key 无效: 与 JJ_PROXY_API_KEY 不一致",
-        )
-    })
-}
-
-fn bearer_or_raw(value: &str) -> &str {
-    let value = value.trim();
-    match value.split_once(' ') {
-        Some((scheme, token)) if scheme.eq_ignore_ascii_case("bearer") => token.trim(),
-        _ => value,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,18 +250,5 @@ mod tests {
         // 客户端按 `owned_by == "Anthropic"` 过滤模型列表, 小写会被筛空。
         assert_eq!(owner_of(Provider::Anthropic), "Anthropic");
         assert_eq!(owner_of(Provider::Codex), "openai");
-    }
-
-    #[test]
-    fn any_key_accepted_without_env() {
-        // 测试进程未设 JJ_PROXY_API_KEY -> 放行
-        assert!(denied(&HeaderMap::new(), Dialect::OpenAI).is_none());
-    }
-
-    #[test]
-    fn bearer_scheme_is_case_insensitive() {
-        assert_eq!(bearer_or_raw("Bearer secret"), "secret");
-        assert_eq!(bearer_or_raw("bearer   secret "), "secret");
-        assert_eq!(bearer_or_raw("raw-secret"), "raw-secret");
     }
 }

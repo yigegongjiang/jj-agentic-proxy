@@ -40,7 +40,7 @@ jj-agentic-proxy logout all       # anthropic | codex | all
 - 端口写死在二进制里, 无任何 host / port 参数: base url 一次写死, 换机器不用改
 - 请求打到哪个端口就走哪家订阅, 与 model 名无关; 路径走错端口时 404 直接给出正确端口
 - base url 两家官方写法都通: `http://127.0.0.1:10011` (Anthropic SDK 约定) 与 `http://127.0.0.1:10011/v1` (OpenAI SDK 约定)
-- api key 填任意非空值即可 (官方 SDK 会本地校验非空); 设了 `JJ_PROXY_API_KEY` 才真的比对
+- api key 填任意非空值即可 (官方 SDK 会本地校验非空); 代理不校验它, 上游身份一律用本机 OAuth 凭证
 - 全放开 CORS: 浏览器页面可直连, 预检由代理直接应答
 
 ## 端点
@@ -78,13 +78,13 @@ jj-agentic-proxy logout all       # anthropic | codex | all
 - CLI 渠道与官方 api key 渠道的差异由代理抹平: 上游硬拒 `stream:false` 与字符串 `input`, 代理补齐后再把 SSE 聚合成官方非流式对象
 - 响应逐块转发不缓冲 -> SSE 首字延迟与官方 CLI 一致; 请求体无大小上限
 - 上游按 Codex CLI 版本 gate 新模型: 版本号跟随本机 `~/.codex/version.json` 自动更新, 内置常量只作下限
-- env: `JJ_PROXY_API_KEY` 开启本机端口的 key 校验, `RUST_LOG` 调日志
+- 零配置: 无任何自定义 env / 参数 (端口、路径、身份全部内置); 只认标准 `RUST_LOG` 调日志
 
 ## 结构
 
 ```
 src/main.rs               CLI (serve / login / logout / status) + 两个固定端口 + 优雅退出
-src/server.rs             端口层: api key 校验 + Chat Completions + 模型列表, 其余落透传
+src/server.rs             端口层: Chat Completions + 模型列表, 其余落透传
 src/proxy.rs              透传: provider 由端口定 + header 注入 + body 规范化 + 带凭证请求上游
 src/convert/mod.rs        Chat Completions 增量模型 + 流式回传 / 非流式聚合
 src/convert/codex.rs      Chat Completions <-> OpenAI Responses
