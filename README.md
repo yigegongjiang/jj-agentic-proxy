@@ -60,7 +60,7 @@ jj-agentic-proxy logout all       # anthropic | codex | all
 - Chat Completions 的上游由端口决定, `model` 只取模型名 (允许 `anthropic/`、`openai/` 前缀)
 - 覆盖: 流式 / 非流式、tools + 工具结果回传、图片 (url 与 data URI)、`response_format`、`reasoning_effort`; 思考内容出 `reasoning_content`
 - `/v1/models` 形状: 10011 带 `x-api-key` / `anthropic-version` -> Anthropic 官方原样; 其余 (含 10010) -> OpenAI 列表, 只含本端口 provider 的模型
-- 代理自产的错误也按方言裹官方信封 (`{"type":"error",...}` / `{"error":{...}}`)
+- 错误一律按方言裹官方信封 (`{"type":"error",...}` / `{"error":{...}}`); 上游已给官方形状则原样透传, 保留 `request-id` 等头
 - 额度查 `10010/backend-api/codex/usage`
 
 ## 架构
@@ -69,7 +69,10 @@ jj-agentic-proxy logout all       # anthropic | codex | all
 - 启动时先 bind 两个端口再 serve: 端口被占用立刻整体失败, 不留「只有一半能用」的中间态
 - 认证: OAuth PKCE (S256); 回调端口被上游 client_id allow-list 写死 (Anthropic 54545 / Codex 1455), 登录时须空闲
 - 凭证: `auth.json` 进程间串行 + 原子写 + 0600; login/logout 热更新; 到期前 300s 主动刷新, 每 provider 单飞锁; 上游 401 时强制续期并重试一次
-- 原生路径: 注入 Bearer 与官方 CLI header, body 仅补齐上游硬要求 (Anthropic 的 Claude Code system 前缀 / Codex 的 `stream`+`store`+`instructions`), 显式传值不被覆盖
+- 原生路径: 注入 Bearer 与官方 CLI header, body 只做上游硬要求的最小改写
+  - Anthropic: system 首块补 Claude Code 前缀 (不带 `cache_control`, 不占客户端的缓存断点、不打乱 ttl 顺序)
+  - Codex: 补 `stream`+`instructions`, 强制 `store:false`, 丢弃上游不认的纯标注参数 (`metadata` / `user` / `safety_identifier` / token 上限)
+  - 有语义的参数 (`temperature` / `previous_response_id` / `background` / ...) 不静默丢弃, 由上游报错并归一成官方信封
 - Chat Completions: 双向转换; 上游一律 SSE, 客户端要非流式时本层聚合 -> 只维护一条解析路径
 - CLI 渠道与官方 api key 渠道的差异由代理抹平: 上游硬拒 `stream:false` 与字符串 `input`, 代理补齐后再把 SSE 聚合成官方非流式对象
 - 响应逐块转发不缓冲 -> SSE 首字延迟与官方 CLI 一致; 请求体无大小上限

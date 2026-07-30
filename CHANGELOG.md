@@ -14,6 +14,16 @@
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-07-31
+
+### Fixed
+
+- Claude Code / Claude Agent SDK 指向 10011 时全部报 400 (缓存块顺序冲突); 现在可正常使用
+- 按官方写法调 codex 的 `store` / token 上限 / `metadata` 等参数不再被拒绝
+- codex 上游的报错改用 OpenAI 官方错误信封, 官方 SDK 能正常读出错误原因
+- 10011 的 `/v1/chat/completions` 补齐 `reasoning_effort` 与 `response_format`, 与 10010 行为一致
+- 10011 模型列表的所属厂商改用官方大小写 `Anthropic`: 修复按厂商名过滤的客户端拉取后得到空列表
+
 ## [0.4.0] - 2026-07-31
 
 ### Changed
@@ -81,7 +91,8 @@
 - 凭证到期前自动续期, 上游拒绝时自动重试一次, 无需手工介入
 - 流式回答逐块透传, 首字延迟与官方 CLI 一致
 
-[Unreleased]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.3.0...v0.3.1

@@ -9,6 +9,8 @@ use crate::sse;
 
 /// Anthropic 的 max_tokens 必填; 客户端没给时的兜底。
 const DEFAULT_MAX_TOKENS: u64 = 8192;
+/// 上游要求 thinking 预算 >= 1024 且 < max_tokens。
+const THINKING_MIN_BUDGET: u64 = 1024;
 
 // ---------- 请求: chat -> messages ----------
 
@@ -64,19 +66,34 @@ pub fn request(req: &Value, model: &str) -> Value {
     let mut out = Map::new();
     out.insert("model".into(), json!(model));
     out.insert("messages".into(), Value::Array(msgs));
-    out.insert(
-        "max_tokens".into(),
-        json!(max_tokens(req).unwrap_or(DEFAULT_MAX_TOKENS)),
-    );
     // 上游只需一条解析路径: 统一 SSE, 非流式由本层聚合。
     out.insert("stream".into(), json!(true));
     if !system.is_empty() {
         out.insert("system".into(), json!(system.join("\n\n")));
     }
-    for key in ["temperature", "top_p", "top_k"] {
-        if let Some(v) = req.get(key).filter(|v| v.is_number()) {
-            out.insert(key.into(), v.clone());
+
+    let mut limit = max_tokens(req).unwrap_or(DEFAULT_MAX_TOKENS);
+    let budget = thinking_budget(req);
+    if let Some(b) = budget {
+        // 思考 token 也计入输出 -> 上限不足时抬高, 否则上游直接拒绝。
+        limit = limit.max(b + THINKING_MIN_BUDGET);
+        out.insert(
+            "thinking".into(),
+            json!({ "type": "enabled", "budget_tokens": b }),
+        );
+    }
+    out.insert("max_tokens".into(), json!(limit));
+
+    // 开思考时上游不接受采样参数。
+    if budget.is_none() {
+        for key in ["temperature", "top_p", "top_k"] {
+            if let Some(v) = req.get(key).filter(|v| v.is_number()) {
+                out.insert(key.into(), v.clone());
+            }
         }
+    }
+    if let Some(f) = output_format(req) {
+        out.insert("output_config".into(), json!({ "format": f }));
     }
     if let Some(stop) = stop_sequences(req) {
         out.insert("stop_sequences".into(), stop);
@@ -143,6 +160,27 @@ fn image_block(part: &Value) -> Option<Value> {
         "type": "image",
         "source": { "type": "base64", "media_type": media_type, "data": data },
     }))
+}
+
+/// `reasoning_effort` -> thinking 预算 (Anthropic 只收 token 数, 没有 effort 档位)。
+fn thinking_budget(req: &Value) -> Option<u64> {
+    match req.get("reasoning_effort")?.as_str()? {
+        "none" | "minimal" => None,
+        "low" => Some(THINKING_MIN_BUDGET),
+        "high" | "xhigh" | "max" => Some(8192),
+        _ => Some(4096), // medium 及未知档位
+    }
+}
+
+/// `response_format` -> `output_config.format` (结构化输出)。
+/// 上游只认 json_schema; `json_object` 无对应形状 -> 不映射, 避免造出假约束。
+fn output_format(req: &Value) -> Option<Value> {
+    let rf = req.get("response_format")?;
+    if rf.get("type").and_then(Value::as_str)? != "json_schema" {
+        return None;
+    }
+    let s = rf.get("json_schema")?;
+    Some(json!({ "type": "json_schema", "schema": s.get("schema")?.clone() }))
 }
 
 fn stop_sequences(req: &Value) -> Option<Value> {
@@ -347,6 +385,39 @@ mod tests {
         assert_eq!(out["messages"][2]["content"].as_array().unwrap().len(), 2);
         assert_eq!(out["tools"][0]["input_schema"], json!({"type":"object"}));
         assert_eq!(out["tool_choice"], json!({"type":"any"}));
+    }
+
+    /// 两个端口的 chat/completions 行为必须一致: codex 侧支持的这两项, anthropic 侧也要有。
+    #[test]
+    fn reasoning_effort_and_response_format_map_to_anthropic() {
+        let req = json!({
+            "messages": [{"role":"user","content":"hi"}],
+            "reasoning_effort": "low",
+            "max_tokens": 100,
+            "temperature": 0.5,
+            "response_format": {"type":"json_schema","json_schema":{"name":"r","schema":{"type":"object"}}},
+        });
+        let out = request(&req, "m");
+        assert_eq!(
+            out["thinking"],
+            json!({"type":"enabled","budget_tokens":1024})
+        );
+        // 上限不足以容纳思考预算 -> 抬高; 开思考时不带采样参数
+        assert_eq!(out["max_tokens"], json!(2048));
+        assert!(out.get("temperature").is_none());
+        assert_eq!(
+            out["output_config"]["format"],
+            json!({"type":"json_schema","schema":{"type":"object"}})
+        );
+
+        // 不要思考 -> 采样参数照旧, 上限不动
+        let plain = request(
+            &json!({"messages":[],"max_tokens":100,"temperature":0.5,"reasoning_effort":"none"}),
+            "m",
+        );
+        assert!(plain.get("thinking").is_none());
+        assert_eq!(plain["max_tokens"], json!(100));
+        assert_eq!(plain["temperature"], json!(0.5));
     }
 
     #[test]

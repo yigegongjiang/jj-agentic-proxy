@@ -187,11 +187,61 @@ pub(crate) async fn handle(
         elapsed_ms = started.elapsed().as_millis(),
         "proxied"
     );
+    // 上游错误形状不一定是官方的 (Codex 后端给 `{"detail":...}`) -> 按方言归一。
+    if !status.is_success() {
+        return normalize_error(resp, dialect).await;
+    }
     // 上游只接受 SSE, 客户端要的是 JSON 对象 -> 本层聚合成官方非流式形状。
-    if plan.aggregate_responses && status.is_success() {
+    if plan.aggregate_responses {
         return convert::aggregate_responses(resp).await;
     }
     relay(resp)
+}
+
+/// 上游错误统一成客户端方言的官方信封。
+///
+/// 上游已给官方形状时原样回传 (保留 `request-id` / `retry-after` 等 SDK 依赖的头),
+/// 否则按方言重裹 -> 客户端的官方 SDK 永远能解析出 message。
+pub(crate) async fn normalize_error(resp: reqwest::Response, dialect: Dialect) -> Response {
+    let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let headers = resp.headers().clone();
+    let raw = resp.bytes().await.unwrap_or_default();
+    let parsed = serde_json::from_slice::<Value>(&raw).ok();
+
+    if parsed
+        .as_ref()
+        .is_some_and(|v| v.get("error").is_some_and(Value::is_object))
+    {
+        let mut builder = Response::builder().status(status);
+        for (name, value) in &headers {
+            if !is_hop_by_hop(name) {
+                builder = builder.header(name, value);
+            }
+        }
+        if let Ok(r) = builder.body(Body::from(raw.clone())) {
+            return r;
+        }
+    }
+
+    let message = parsed
+        .as_ref()
+        .and_then(|v| {
+            ["/error/message", "/detail", "/message", "/error"]
+                .iter()
+                .find_map(|p| v.pointer(p).and_then(Value::as_str).map(str::to_string))
+        })
+        .unwrap_or_else(|| String::from_utf8_lossy(&raw).into_owned());
+    dialect.error(status, error_kind(status), &message)
+}
+
+/// 4xx 是请求本身的问题, 5xx 才算上游故障。
+pub(crate) fn error_kind(status: StatusCode) -> &'static str {
+    match status.as_u16() {
+        401 | 403 => "authentication",
+        404 => "not_found",
+        400..=499 => "invalid_request",
+        _ => "upstream",
+    }
 }
 
 /// 带凭证发起上游请求: 到期预判刷新 + 401 强制续期重试一次。
@@ -409,10 +459,11 @@ fn prepare_body(target: &Target, body: Bytes) -> (Bytes, Plan) {
 }
 
 pub(crate) fn inject_claude_code_prefix(obj: &mut Map<String, Value>) -> bool {
+    // 不带 cache_control: 客户端自己的 breakpoint 才是权威。
+    // 注入一个 5m 块会插在客户端的 1h 块之前 -> 上游按 ttl 顺序硬拒 (400), 且白占一个 breakpoint。
     let prefix = json!({
         "type": "text",
         "text": provider::CLAUDE_CODE_SYSTEM_PREFIX,
-        "cache_control": { "type": "ephemeral" },
     });
     let has_prefix = |v: &Value| {
         v.get("text")
@@ -452,6 +503,17 @@ pub(crate) fn inject_claude_code_prefix(obj: &mut Map<String, Value>) -> bool {
     }
 }
 
+/// 官方 Responses API 有、ChatGPT 订阅后端没有的纯标注参数: 丢掉不改变结果, 留着直接 400。
+/// 有语义的 (temperature / previous_response_id / background / truncation / service_tier)
+/// 不能静默丢 -> 交给上游报错, 由错误信封归一后按官方形状回给客户端。
+const CODEX_DROP_KEYS: [&str; 5] = [
+    "metadata",
+    "user",
+    "safety_identifier",
+    "max_output_tokens",
+    "max_tokens",
+];
+
 fn normalize_codex(obj: &mut Map<String, Value>) -> bool {
     let mut changed = false;
     // 上游硬拒 stream:false ("Stream must be set to true")。
@@ -459,9 +521,17 @@ fn normalize_codex(obj: &mut Map<String, Value>) -> bool {
         obj.insert("stream".into(), json!(true));
         changed = true;
     }
-    for (key, default) in [("store", json!(false)), ("instructions", json!(""))] {
-        if !obj.contains_key(key) {
-            obj.insert(key.into(), default);
+    // 官方默认 store:true, 上游只接受 false; 后端本就不落库 -> 强制改写无语义损失。
+    if obj.get("store") != Some(&Value::Bool(false)) {
+        obj.insert("store".into(), json!(false));
+        changed = true;
+    }
+    if !obj.contains_key("instructions") {
+        obj.insert("instructions".into(), json!(""));
+        changed = true;
+    }
+    for key in CODEX_DROP_KEYS {
+        if obj.remove(key).is_some() {
             changed = true;
         }
     }
@@ -728,6 +798,25 @@ mod tests {
         assert_eq!(v["system"].as_array().unwrap().len(), 1);
     }
 
+    /// 客户端 (Claude Code CLI / Agent SDK) 用 1h 缓存时, 注入块若带默认 5m 会被上游按 ttl 顺序拒绝。
+    #[test]
+    fn injected_prefix_carries_no_cache_control() {
+        let t = resolved(Provider::Anthropic, "/v1/messages");
+        let client = r#"{"system":[
+            {"type":"text","text":"billing"},
+            {"type":"text","text":"big prompt","cache_control":{"type":"ephemeral","ttl":"1h"}}
+        ]}"#;
+        let (body, _) = prepare_body(&t, Bytes::from(client));
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            v["system"][0]["text"].as_str().unwrap(),
+            provider::CLAUDE_CODE_SYSTEM_PREFIX
+        );
+        assert!(v["system"][0].get("cache_control").is_none());
+        // 客户端自己的 breakpoint 原样保留
+        assert_eq!(v["system"][2]["cache_control"]["ttl"], json!("1h"));
+    }
+
     #[test]
     fn string_system_is_promoted_to_blocks() {
         let t = resolved(Provider::Anthropic, "/v1/messages");
@@ -762,6 +851,22 @@ mod tests {
         // 客户端要流式 -> 原样 SSE 回传
         let (_, plan) = prepare_body(&t, Bytes::from(r#"{"stream":true}"#));
         assert!(!plan.aggregate_responses);
+    }
+
+    /// 官方 Responses API 的默认 store:true 与纯标注参数, 上游一律 400 -> 本层抹平。
+    #[test]
+    fn codex_drops_params_upstream_rejects() {
+        let t = resolved(Provider::Codex, "/v1/responses");
+        let raw = r#"{"model":"m","input":[],"store":true,"max_output_tokens":64,
+            "metadata":{"a":"b"},"user":"u","safety_identifier":"s","temperature":1}"#;
+        let (body, _) = prepare_body(&t, Bytes::from(raw));
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["store"], json!(false));
+        for k in CODEX_DROP_KEYS {
+            assert!(v.get(k).is_none(), "{k} 应被丢弃");
+        }
+        // 有语义的参数不静默丢: 交给上游报错
+        assert_eq!(v["temperature"], json!(1));
     }
 
     #[test]
@@ -817,6 +922,58 @@ mod tests {
         assert!(!is_hop_by_hop(&HeaderName::from_static("content-encoding")));
         assert!(is_hop_by_hop(&CONNECTION));
         assert!(is_hop_by_hop(&CONTENT_LENGTH));
+    }
+
+    /// Codex 后端的 `{"detail":...}` 不是官方形状 -> 官方 SDK 解析不出 message。
+    #[tokio::test]
+    async fn non_official_upstream_error_is_rewrapped() {
+        let resp = stub(400, r#"{"detail":"Store must be set to false"}"#).await;
+        let out = normalize_error(resp, Dialect::OpenAI).await;
+        assert_eq!(out.status(), StatusCode::BAD_REQUEST);
+        let v = body_json(out).await;
+        assert_eq!(v["error"]["message"], json!("Store must be set to false"));
+        assert_eq!(v["error"]["type"], json!("invalid_request_error"));
+    }
+
+    /// 上游已是官方信封 -> 原样回传, 不丢 request_id 之类的字段。
+    #[tokio::test]
+    async fn official_upstream_error_is_passed_through() {
+        let raw = r#"{"type":"error","error":{"type":"rate_limit_error","message":"slow down"},"request_id":"req_1"}"#;
+        let resp = stub(429, raw).await;
+        let out = normalize_error(resp, Dialect::Anthropic).await;
+        assert_eq!(out.status(), StatusCode::TOO_MANY_REQUESTS);
+        let v = body_json(out).await;
+        assert_eq!(v["request_id"], json!("req_1"));
+        assert_eq!(v["error"]["type"], json!("rate_limit_error"));
+    }
+
+    async fn stub(status: u16, body: &str) -> reqwest::Response {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = body.to_string();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = stream.read(&mut [0u8; 1024]);
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        });
+        reqwest::Client::new()
+            .get(format!("http://{addr}"))
+            .send()
+            .await
+            .unwrap()
+    }
+
+    async fn body_json(r: Response) -> Value {
+        let b = axum::body::to_bytes(r.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&b).unwrap()
     }
 
     #[test]

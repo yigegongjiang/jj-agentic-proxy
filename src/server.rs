@@ -126,35 +126,14 @@ async fn chat_completions(State(port): State<Port>, body: Bytes) -> Response {
         "chat.completions"
     );
     if !status.is_success() {
-        return upstream_error(resp).await;
+        // chat/completions 永远是 OpenAI 协议 -> 错误信封也固定 OpenAI 形状。
+        return proxy::normalize_error(resp, Dialect::OpenAI).await;
     }
     if want_stream {
         convert::stream_response(p, model, resp, include_usage)
     } else {
         convert::aggregate_response(p, model, resp).await
     }
-}
-
-/// 上游错误裹成 OpenAI 信封, 保留原始文案。
-async fn upstream_error(resp: reqwest::Response) -> Response {
-    let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-    let raw = resp.bytes().await.unwrap_or_default();
-    let msg = serde_json::from_slice::<Value>(&raw)
-        .ok()
-        .and_then(|v| {
-            ["/error/message", "/detail", "/message", "/error"]
-                .iter()
-                .find_map(|p| v.pointer(p).and_then(Value::as_str).map(str::to_string))
-        })
-        .unwrap_or_else(|| String::from_utf8_lossy(&raw).into_owned());
-    // 4xx 是请求本身的问题, 归 invalid_request; 5xx 才是 api_error。
-    let kind = match status.as_u16() {
-        401 | 403 => "authentication",
-        404 => "not_found",
-        400..=499 => "invalid_request",
-        _ => "upstream",
-    };
-    Dialect::OpenAI.error(status, kind, &msg)
 }
 
 // ---------- 模型列表 (OpenAI 方言) ----------
@@ -182,14 +161,26 @@ async fn openai_model(State(port): State<Port>, id: &str) -> Response {
     }
 }
 
+/// `owned_by` 取官方厂商名的规范大小写。
+///
+/// Anthropic 没有 OpenAI 形状的 models 端点 -> 无既定小写约定, 而客户端
+/// (ChatWise 等) 按 `owned_by == "Anthropic"` 过滤, 小写会被筛成空列表。
+/// Codex 保持 `openai`: OpenAI 官方 `/v1/models` 就是小写。
+fn owner_of(p: Provider) -> &'static str {
+    match p {
+        Provider::Anthropic => "Anthropic",
+        Provider::Codex => "openai",
+    }
+}
+
 /// 取不到不报错 -> 列表尽力而为。
 async fn list(app: &Arc<App>, p: Provider) -> Vec<Value> {
-    let (url, list_key, id_key, owner) = match p {
+    let owner = owner_of(p);
+    let (url, list_key, id_key) = match p {
         Provider::Anthropic => (
             format!("{}/v1/models?limit=1000", provider::ANTHROPIC_UPSTREAM),
             "data",
             "id",
-            "anthropic",
         ),
         Provider::Codex => (
             format!(
@@ -199,7 +190,6 @@ async fn list(app: &Arc<App>, p: Provider) -> Vec<Value> {
             ),
             "models",
             "slug",
-            "openai",
         ),
     };
     let sent = proxy::upstream(
@@ -296,7 +286,14 @@ mod tests {
         assert_eq!(out[0]["id"], json!("gpt-5.6-sol"));
         assert_eq!(out[0]["object"], json!("model"));
         assert_eq!(out[0]["owned_by"], json!("openai"));
-        assert!(entries(&json!({}), "data", "id", "anthropic").is_empty());
+        assert!(entries(&json!({}), "data", "id", "Anthropic").is_empty());
+    }
+
+    #[test]
+    fn owner_uses_vendor_casing() {
+        // 客户端按 `owned_by == "Anthropic"` 过滤模型列表, 小写会被筛空。
+        assert_eq!(owner_of(Provider::Anthropic), "Anthropic");
+        assert_eq!(owner_of(Provider::Codex), "openai");
     }
 
     #[test]
