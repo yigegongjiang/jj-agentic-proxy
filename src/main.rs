@@ -1,11 +1,15 @@
 //! 本机 agentic proxy: 复用自有订阅, 以官方协议暴露 Anthropic / OpenAI Codex 端点。
 
 mod auth;
+mod compat;
+mod convert;
 mod oauth;
 mod provider;
 mod proxy;
+mod sse;
 mod store;
 
+use std::future::IntoFuture as _;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -35,8 +39,12 @@ enum Cmd {
     Serve {
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
+        /// 原生协议端口 (官方 body 原样透传)
         #[arg(long, short, default_value_t = 10000)]
         port: u16,
+        /// api key 兼容端口 (Chat Completions + 原生); 0 = 关闭
+        #[arg(long, default_value_t = 10001)]
+        compat_port: u16,
     },
     /// Web OAuth 授权: anthropic | codex
     Login { provider: String },
@@ -52,15 +60,23 @@ async fn main() -> Result<()> {
     match cli.cmd.unwrap_or(Cmd::Serve {
         host: "127.0.0.1".into(),
         port: 10000,
+        compat_port: 10001,
     }) {
-        Cmd::Serve { host, port } => serve(host, port).await,
+        Cmd::Serve {
+            host,
+            port,
+            compat_port,
+        } => serve(host, port, compat_port).await,
         Cmd::Login { provider } => login(&provider).await,
         Cmd::Logout { provider } => logout(&provider),
         Cmd::Status => status(),
     }
 }
 
-async fn serve(host: String, port: u16) -> Result<()> {
+async fn serve(host: String, port: u16, compat_port: u16) -> Result<()> {
+    if compat_port == port {
+        bail!("--compat-port 不能与 --port 相同");
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
@@ -86,15 +102,45 @@ async fn serve(host: String, port: u16) -> Result<()> {
         http,
         session_id: new_session_id(),
     });
-    let listener = tokio::net::TcpListener::bind((host.as_str(), port))
-        .await
-        .with_context(|| format!("监听 {host}:{port} 失败"))?;
+    let native = bind(&host, port).await?;
+    tracing::info!("native  listening on http://{host}:{port} (官方协议原样透传)");
+    let native = tokio::spawn(
+        axum::serve(native, proxy::router(app.clone()))
+            .with_graceful_shutdown(shutdown())
+            .into_future(),
+    );
 
-    tracing::info!("listening on http://{host}:{port}");
-    axum::serve(listener, proxy::router(app))
-        .with_graceful_shutdown(shutdown())
+    let compat = match compat_port {
+        0 => None,
+        p => {
+            let l = bind(&host, p).await?;
+            tracing::info!(
+                "compat  listening on http://{host}:{p} (api key 风格; 含 /v1/chat/completions)"
+            );
+            Some(tokio::spawn(
+                axum::serve(l, compat::router(app))
+                    .with_graceful_shutdown(shutdown())
+                    .into_future(),
+            ))
+        }
+    };
+
+    native
         .await
-        .context("HTTP 服务异常退出")
+        .context("原生端口任务异常")?
+        .context("原生端口服务异常退出")?;
+    if let Some(task) = compat {
+        task.await
+            .context("兼容端口任务异常")?
+            .context("兼容端口服务异常退出")?;
+    }
+    Ok(())
+}
+
+async fn bind(host: &str, port: u16) -> Result<tokio::net::TcpListener> {
+    tokio::net::TcpListener::bind((host, port))
+        .await
+        .with_context(|| format!("监听 {host}:{port} 失败"))
 }
 
 async fn login(name: &str) -> Result<()> {

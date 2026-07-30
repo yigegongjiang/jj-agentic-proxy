@@ -14,6 +14,15 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-30
+
+### Added
+
+- 新增 `10001` 兼容端口: 业务照常用 api key 方式调用, 代理内部换成订阅渠道
+- 支持 OpenAI `/v1/chat/completions`: 选 Claude 或 GPT 模型都走这一个端点, 流式 / 工具调用 / 图片 / 结构化输出均可用
+- 该端口的 `/v1/models` 返回两家可用模型合并列表, 客户端可直接选模型
+- 可选 `JJ_PROXY_API_KEY`: 设了才校验 api key, 默认接受任意值
+
 ## [0.1.0] - 2026-07-30
 
 ### Added
@@ -23,5 +32,6 @@
 - 凭证到期前自动续期, 上游拒绝时自动重试一次, 无需手工介入
 - 流式回答逐块透传, 首字延迟与官方 CLI 一致
 
-[Unreleased]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/yigegongjiang/jj-agentic-proxy/releases/tag/v0.2.0
 [0.1.0]: https://github.com/yigegongjiang/jj-agentic-proxy/releases/tag/v0.1.0

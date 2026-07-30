@@ -35,7 +35,7 @@ pub fn router(app: Arc<App>) -> Router {
         .with_state(app)
 }
 
-async fn health(State(app): State<Arc<App>>) -> Response {
+pub(crate) async fn health(State(app): State<Arc<App>>) -> Response {
     let mut providers = Map::new();
     for p in Provider::ALL {
         let entry = match app.auth.snapshot(p).await {
@@ -57,13 +57,14 @@ async fn health(State(app): State<Arc<App>>) -> Response {
             "endpoints": {
                 "anthropic": ["/v1/messages", "/v1/messages/count_tokens", "/v1/models"],
                 "codex": ["/v1/responses", "/v1/responses/compact"],
+                "compat_only": ["/v1/chat/completions", "/v1/models"],
             },
             "providers": providers,
         }),
     )
 }
 
-async fn handle(
+pub(crate) async fn handle(
     State(app): State<Arc<App>>,
     method: Method,
     uri: Uri,
@@ -77,7 +78,7 @@ async fn handle(
             json!({
                 "error": {
                     "type": "not_found",
-                    "message": format!("未支持的路径 {path}; 可用: /v1/messages, /v1/messages/count_tokens, /v1/models (Anthropic), /v1/responses (Codex)"),
+                    "message": format!("未支持的路径 {path}; 可用: /v1/messages, /v1/messages/count_tokens, /v1/models (Anthropic), /v1/responses (Codex), /v1/chat/completions (仅兼容端口)"),
                 }
             }),
         );
@@ -85,65 +86,92 @@ async fn handle(
 
     let (body, stream) = prepare_body(&target, body);
     let started = Instant::now();
-    let mut force_refresh = false;
 
+    let resp = match upstream(
+        &app,
+        target.provider,
+        method.clone(),
+        &target.url,
+        &headers,
+        body,
+        stream,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    tracing::info!(
+        provider = %target.provider,
+        %method,
+        path = %path,
+        status = resp.status().as_u16(),
+        elapsed_ms = started.elapsed().as_millis(),
+        "proxied"
+    );
+    relay(resp)
+}
+
+/// 带凭证发起上游请求: 到期预判刷新 + 401 强制续期重试一次。
+///
+/// `Err` 已是可直接返回给客户端的错误响应。
+pub(crate) async fn upstream(
+    app: &App,
+    provider: Provider,
+    method: Method,
+    url: &str,
+    client: &HeaderMap,
+    body: Bytes,
+    stream: bool,
+) -> Result<reqwest::Response, Response> {
+    let mut force_refresh = false;
     for attempt in 0..2u8 {
-        let cred = match app.auth.token(target.provider, force_refresh).await {
+        let cred = match app.auth.token(provider, force_refresh).await {
             Ok(c) => c,
             Err(e) => {
-                return json_body(
+                return Err(json_body(
                     StatusCode::UNAUTHORIZED,
                     json!({ "error": { "type": "authentication_error", "message": e.to_string() } }),
-                );
+                ))
             }
         };
 
-        let upstream_headers = match target.provider {
-            Provider::Anthropic => anthropic_headers(&cred.access_token, &headers, stream),
-            Provider::Codex => codex_headers(&app, &cred, &headers, stream),
+        let upstream_headers = match provider {
+            Provider::Anthropic => anthropic_headers(&cred.access_token, client, stream),
+            Provider::Codex => codex_headers(app, &cred, client, stream),
         };
 
-        let result = app
+        match app
             .http
-            .request(method.clone(), &target.url)
+            .request(method.clone(), url)
             .headers(upstream_headers)
             .body(body.clone())
             .send()
-            .await;
-
-        match result {
+            .await
+        {
             Ok(resp) => {
-                let status = resp.status();
                 // 401 = token 失效: 强制续期后重试一次。
-                if status == StatusCode::UNAUTHORIZED && attempt == 0 {
-                    tracing::warn!(provider = %target.provider, "上游 401, 强制刷新 token 重试");
+                if resp.status() == StatusCode::UNAUTHORIZED && attempt == 0 {
+                    tracing::warn!(provider = %provider, "上游 401, 强制刷新 token 重试");
                     force_refresh = true;
                     continue;
                 }
-                tracing::info!(
-                    provider = %target.provider,
-                    %method,
-                    path = %path,
-                    status = status.as_u16(),
-                    elapsed_ms = started.elapsed().as_millis(),
-                    "proxied"
-                );
-                return relay(resp);
+                return Ok(resp);
             }
             Err(e) => {
-                tracing::error!(provider = %target.provider, error = %e, "上游请求失败");
-                return json_body(
+                tracing::error!(provider = %provider, error = %e, "上游请求失败");
+                return Err(json_body(
                     StatusCode::BAD_GATEWAY,
                     json!({ "error": { "type": "upstream_error", "message": e.to_string() } }),
-                );
+                ));
             }
         }
     }
 
-    json_body(
+    Err(json_body(
         StatusCode::UNAUTHORIZED,
         json!({ "error": { "type": "authentication_error", "message": "上游持续返回 401, 请重新执行 login" } }),
-    )
+    ))
 }
 
 // ---------- 路由 ----------
@@ -237,7 +265,7 @@ fn prepare_body(target: &Target, body: Bytes) -> (Bytes, bool) {
     }
 }
 
-fn inject_claude_code_prefix(obj: &mut Map<String, Value>) -> bool {
+pub(crate) fn inject_claude_code_prefix(obj: &mut Map<String, Value>) -> bool {
     let prefix = json!({
         "type": "text",
         "text": provider::CLAUDE_CODE_SYSTEM_PREFIX,
@@ -419,7 +447,7 @@ fn is_hop_by_hop(name: &HeaderName) -> bool {
         || name == "trailer"
 }
 
-fn json_body(status: StatusCode, value: Value) -> Response {
+pub(crate) fn json_body(status: StatusCode, value: Value) -> Response {
     (status, axum::Json(value)).into_response()
 }
 
