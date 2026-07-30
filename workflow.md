@@ -10,6 +10,8 @@
 
 - `gh`: 已登录
 - `cargo`: 本机 toolchain (未登录 crates.io -> 不发布 crate)
+- `scripts/install-local.sh`: 本机构建 + 装入 `~/.local/bin` (预部署用)
+- `scripts/install.sh`: 面向使用者, 从 GitHub Releases 下载二进制 (AI 不执行)
 
 # 发布
 
@@ -21,8 +23,9 @@
 
 1. 验证：`cargo fmt --check` + `cargo clippy -- -D warnings` + `cargo test` + `cargo build --release`
 2. 写版本：`Cargo.toml` + `Cargo.lock` + `CHANGELOG.md` 同步 (与 tag 一致)
-3. 预部署：`cargo install --path . --locked --force --root ~/.local` (装入 `~/.local/bin`)
+3. 预部署：`./scripts/install-local.sh` (装入 `~/.local/bin`)
 4. 发布：commit + annotated tag (`-a -m`) + push branch + tag
+5. 分发：push tag 触发 GHA 出 Release 二进制, 确认绿灯
 
 ## 1. 验证
 
@@ -43,16 +46,20 @@ cargo build --release
 
 ## 3. 预部署
 
-本机安装可执行二进制到 `~/.local/bin`:
+本机构建 + 安装二进制到 `~/.local/bin`, 末尾自动跑 `--version` 自检:
 
 ```bash
-cargo install --path . --locked --force --root ~/.local
+./scripts/install-local.sh            # 默认落 ~/.local/bin
+INSTALL_DIR=/some/dir ./scripts/install-local.sh   # 改目标目录
 ```
 
-> `--root ~/.local` 使产物落 `~/.local/bin/jj-agentic-proxy`, MUST NOT 用默认 `~/.cargo/bin`。
-> `--force` 只覆盖同名二进制, 不影响目录内其他 `jj-*` CLI; 正在运行的旧进程需自行停止后再验证新版本。
+- 内容: `cargo build --release` -> 临时文件 -> `mv` 原子替换 `~/.local/bin/jj-agentic-proxy`
+- 只覆盖同名二进制, 不影响目录内其他 `jj-*` CLI
 
-验证: `jj-agentic-proxy --version` 输出与本次 tag 一致。
+> MUST NOT 改回 `cp` 原地覆盖: macOS 会因代码签名缓存失效直接 `Killed: 9`。
+> 正在运行的旧进程需自行停止后再验证新版本。
+
+验证: 脚本输出的 `--version` 与本次 tag 一致。
 
 ## 4. 发布
 
@@ -62,4 +69,22 @@ git commit -m "release: vX.Y.Z"
 git tag -a vX.Y.Z -m "vX.Y.Z"
 git push origin master
 git push origin vX.Y.Z
+```
+
+## 5. 分发 (GHA)
+
+push tag 自动触发 `.github/workflows/release.yml`: 校验 tag == `Cargo.toml` version -> 交叉编译 `x86_64/aarch64-apple-darwin` -> `shasum -a 256` -> 建 GitHub Release (二进制 + `checksums.txt`)。
+
+```bash
+gh run watch                    # 跟到结束
+gh release view vX.Y.Z          # 确认 jj-agentic-proxy-darwin-{x64,arm64} + checksums.txt 齐全
+```
+
+> 失败多因 tag 与 `Cargo.toml` version 不一致: 修版本 -> 删 tag (`git tag -d` + `git push origin :vX.Y.Z`) -> 重打重推。
+> 版本已被使用者装走后 MUST NOT 重推同名 tag。
+
+使用者安装入口 (AI 不执行):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/yigegongjiang/jj-agentic-proxy/master/scripts/install.sh | bash
 ```

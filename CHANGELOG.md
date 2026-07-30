@@ -14,6 +14,13 @@
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-07-31
+
+### Added
+
+- 一键安装: `curl -fsSL https://raw.githubusercontent.com/yigegongjiang/jj-agentic-proxy/master/scripts/install.sh | bash`, 自动取最新版并校验完整性
+- 每次发版随附 macOS arm64 / x64 二进制与校验和, 无需自行编译
+
 ## [0.3.0] - 2026-07-31
 
 ### Fixed
