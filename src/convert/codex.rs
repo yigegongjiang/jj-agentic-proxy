@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use serde_json::{json, Map, Value};
 
-use super::{max_tokens, messages, text_of, tool_def, Delta, Translate};
+use super::{messages, text_of, tool_def, Delta, Translate};
 use crate::sse;
 
 // ---------- 请求: chat -> responses ----------
@@ -75,9 +75,7 @@ pub fn request(req: &Value, model: &str) -> Value {
     if let Some(v) = req.get("parallel_tool_calls").filter(|v| v.is_boolean()) {
         out.insert("parallel_tool_calls".into(), v.clone());
     }
-    if let Some(n) = max_tokens(req) {
-        out.insert("max_output_tokens".into(), json!(n));
-    }
+    // ChatGPT 订阅后端拒绝 `max_tokens` / `max_output_tokens`; Codex CLI 同样不发送上限。
     if let Some(r) = reasoning(req) {
         out.insert("reasoning".into(), r);
     }
@@ -365,7 +363,8 @@ mod tests {
         assert_eq!(out["input"][1]["output"], json!("42"));
         assert_eq!(out["tools"][0]["name"], json!("f"));
         assert_eq!(out["tool_choice"], json!({"type":"function","name":"f"}));
-        assert_eq!(out["max_output_tokens"], json!(128));
+        assert!(out.get("max_output_tokens").is_none());
+        assert!(out.get("max_tokens").is_none());
     }
 
     #[test]

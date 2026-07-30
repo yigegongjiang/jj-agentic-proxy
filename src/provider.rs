@@ -7,6 +7,9 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+/// 只监听 loopback: 代理持有个人订阅凭证, 不对外暴露。
+pub const HOST: &str = "127.0.0.1";
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Provider {
     Anthropic,
@@ -14,12 +17,27 @@ pub enum Provider {
 }
 
 impl Provider {
-    pub const ALL: [Provider; 2] = [Provider::Anthropic, Provider::Codex];
+    pub const ALL: [Provider; 2] = [Provider::Codex, Provider::Anthropic];
 
     pub fn key(self) -> &'static str {
         match self {
             Provider::Anthropic => "anthropic",
             Provider::Codex => "codex",
+        }
+    }
+
+    /// 一个 provider 一个固定端口, 不可配置 -> 客户端 base url 永远可写死。
+    pub const fn port(self) -> u16 {
+        match self {
+            Provider::Codex => 10010,
+            Provider::Anthropic => 10011,
+        }
+    }
+
+    pub const fn other(self) -> Self {
+        match self {
+            Provider::Anthropic => Provider::Codex,
+            Provider::Codex => Provider::Anthropic,
         }
     }
 

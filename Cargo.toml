@@ -1,6 +1,6 @@
 [package]
 name = "jj-agentic-proxy"
-version = "0.3.2"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.82"
 description = "本机 agentic proxy: 复用自有订阅, 为其他 app 提供 Anthropic / OpenAI Codex 官方协议端点"

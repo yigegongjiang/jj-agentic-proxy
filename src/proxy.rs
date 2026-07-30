@@ -1,4 +1,4 @@
-//! 透传层: 按 path 定上游 -> 注入官方 CLI 凭证与 header -> 流式回传。
+//! 透传层: provider 由端口固定 -> 按 path 定上游 -> 注入官方 CLI 凭证与 header -> 流式回传。
 //!
 //! 只做官方协议要求的最小改写: 客户端看到的行为必须与官方 api key 服务一致。
 
@@ -6,15 +6,13 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::body::{Body, Bytes};
-use axum::extract::{DefaultBodyLimit, State};
+use axum::extract::State;
 use axum::http::header::{
     ACCEPT, AUTHORIZATION, CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, TRANSFER_ENCODING, UPGRADE,
     USER_AGENT,
 };
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
-use axum::routing::any;
-use axum::Router;
 use serde_json::{json, Map, Value};
 
 use crate::auth::AuthManager;
@@ -28,13 +26,32 @@ pub struct App {
     pub session_id: String,
 }
 
-pub fn router(app: Arc<App>) -> Router {
-    Router::new()
-        .route("/health", any(health))
-        .fallback(any(handle))
-        .layer(DefaultBodyLimit::disable())
-        .layer(cors())
-        .with_state(app)
+/// 一个端口 = 一个 provider: 请求打到哪个端口就决定走哪家上游。
+#[derive(Clone)]
+pub struct Port {
+    pub app: Arc<App>,
+    pub provider: Provider,
+}
+
+/// 该端口对外可用路径 (404 提示与 /health 共用一份)。
+pub(crate) fn endpoints(provider: Provider) -> &'static [&'static str] {
+    match provider {
+        Provider::Anthropic => &[
+            "/v1/messages",
+            "/v1/messages/count_tokens",
+            "/v1/models",
+            "/v1/chat/completions",
+            "/health",
+        ],
+        Provider::Codex => &[
+            "/v1/responses",
+            "/v1/responses/compact",
+            "/v1/models",
+            "/v1/chat/completions",
+            "/backend-api/codex/*",
+            "/health",
+        ],
+    }
 }
 
 /// 浏览器里的本地页面也要能直连 -> 全放开; 预检由该层直接应答, 不打到上游。
@@ -48,31 +65,26 @@ pub(crate) fn cors() -> tower_http::cors::CorsLayer {
         .max_age(std::time::Duration::from_secs(86400))
 }
 
-pub(crate) async fn health(State(app): State<Arc<App>>) -> Response {
-    let mut providers = Map::new();
-    for p in Provider::ALL {
-        let entry = match app.auth.snapshot(p).await {
-            Some(c) => json!({
-                "logged_in": true,
-                "account": c.account,
-                "plan": c.plan,
-                "expires_at": c.expires_at,
-            }),
-            None => json!({ "logged_in": false }),
-        };
-        providers.insert(p.key().to_string(), entry);
-    }
+pub(crate) async fn health(State(port): State<Port>) -> Response {
+    let p = port.provider;
+    let login = match port.app.auth.snapshot(p).await {
+        Some(c) => json!({
+            "logged_in": true,
+            "account": c.account,
+            "plan": c.plan,
+            "expires_at": c.expires_at,
+        }),
+        None => json!({ "logged_in": false }),
+    };
     json_body(
         StatusCode::OK,
         json!({
             "name": env!("CARGO_PKG_NAME"),
             "version": env!("CARGO_PKG_VERSION"),
-            "endpoints": {
-                "anthropic": ["/v1/messages", "/v1/messages/count_tokens", "/v1/models"],
-                "openai": ["/v1/responses", "/v1/models"],
-                "compat_only": ["/v1/chat/completions"],
-            },
-            "providers": providers,
+            "provider": p.key(),
+            "port": p.port(),
+            "auth": login,
+            "endpoints": endpoints(p),
         }),
     )
 }
@@ -131,7 +143,7 @@ impl Dialect {
 // ---------- 请求处理 ----------
 
 pub(crate) async fn handle(
-    State(app): State<Arc<App>>,
+    State(port): State<Port>,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
@@ -139,11 +151,11 @@ pub(crate) async fn handle(
 ) -> Response {
     let path = uri.path().to_string();
     let dialect = Dialect::of(&headers);
-    let Some(target) = resolve(&path, uri.query()) else {
+    let Some(target) = resolve(port.provider, &path, uri.query()) else {
         return dialect.error(
             StatusCode::NOT_FOUND,
             "not_found",
-            &format!("未支持的路径 {path}; 可用: /v1/messages, /v1/messages/count_tokens, /v1/models, /v1/responses, /v1/chat/completions (仅兼容端口)"),
+            &not_found_hint(port.provider, &path),
         );
     };
 
@@ -151,7 +163,7 @@ pub(crate) async fn handle(
     let started = Instant::now();
 
     let resp = match upstream(
-        &app,
+        &port.app,
         target.provider,
         method.clone(),
         &target.url,
@@ -255,6 +267,24 @@ struct Target {
     upstream_path: String,
 }
 
+/// 走错端口是端口拆分后最常见的误用 -> 直接给出正确端口, 不让客户端猜。
+fn not_found_hint(provider: Provider, path: &str) -> String {
+    let other = provider.other();
+    if resolve(other, path, None).is_some() {
+        format!(
+            "路径 {path} 属于 {other}, 请改用 http://{}:{}",
+            provider::HOST,
+            other.port()
+        )
+    } else {
+        format!(
+            "未支持的路径 {path}; {provider} 端口 ({}) 可用: {}",
+            provider.port(),
+            endpoints(provider).join(", ")
+        )
+    }
+}
+
 /// 官方两家 base url 约定不同: Anthropic 到域名根 (SDK 自己拼 `/v1`), OpenAI 到 `/v1`。
 /// 客户端两种写法都必须通 -> 去掉前导 `/v1` 后再路由。
 pub(crate) fn strip_v1(path: &str) -> &str {
@@ -273,24 +303,23 @@ pub(crate) fn strip_v1(path: &str) -> &str {
     }
 }
 
-/// path 决定协议与上游: 客户端选 model -> 决定协议 -> 决定 path。
-fn resolve(path: &str, query: Option<&str>) -> Option<Target> {
+/// provider 由端口固定; path 只决定上游子路径, 不属于该 provider 的路径直接拒绝。
+fn resolve(provider: Provider, path: &str, query: Option<&str>) -> Option<Target> {
     let p = strip_v1(path);
-    let anthropic = ["/messages", "/models", "/complete"]
-        .iter()
-        .any(|pre| sub_path(p, pre).is_some());
-
-    let (provider, base, upstream_path) = if anthropic {
-        (
-            Provider::Anthropic,
-            provider::ANTHROPIC_UPSTREAM,
-            format!("/v1{p}"),
-        )
-    } else if sub_path(p, "/responses").is_some() {
-        (Provider::Codex, provider::CODEX_UPSTREAM, p.to_string())
-    } else {
-        let rest = sub_path(path, "/backend-api/codex")?;
-        (Provider::Codex, provider::CODEX_UPSTREAM, rest.to_string())
+    let (base, upstream_path) = match provider {
+        Provider::Anthropic => {
+            let hit = ["/messages", "/models", "/complete"]
+                .iter()
+                .any(|pre| sub_path(p, pre).is_some());
+            hit.then(|| (provider::ANTHROPIC_UPSTREAM, format!("/v1{p}")))?
+        }
+        Provider::Codex => {
+            let rest = match sub_path(p, "/responses") {
+                Some(_) => p.to_string(),
+                None => sub_path(path, "/backend-api/codex")?.to_string(),
+            };
+            (provider::CODEX_UPSTREAM, rest)
+        }
     };
 
     let mut url = format!("{base}{upstream_path}");
@@ -580,69 +609,92 @@ pub(crate) fn json_body(status: StatusCode, value: Value) -> Response {
 mod tests {
     use super::*;
 
-    fn resolved(path: &str) -> Target {
-        resolve(path, None).expect("路径应可解析")
+    fn resolved(provider: Provider, path: &str) -> Target {
+        resolve(provider, path, None).expect("路径应可解析")
     }
 
     #[test]
     fn both_base_url_conventions_route_the_same() {
         // Anthropic SDK: base = 域名根 -> /v1/messages
         assert_eq!(
-            resolved("/v1/messages").url,
+            resolved(Provider::Anthropic, "/v1/messages").url,
             "https://api.anthropic.com/v1/messages"
         );
         // OpenAI SDK: base = .../v1 -> /chat 之外的路径不带 /v1
         assert_eq!(
-            resolved("/responses").url,
+            resolved(Provider::Codex, "/responses").url,
             "https://chatgpt.com/backend-api/codex/responses"
         );
         assert_eq!(
-            resolved("/models").url,
+            resolved(Provider::Anthropic, "/models").url,
             "https://api.anthropic.com/v1/models"
         );
         // base 误写成 .../v1 又被 SDK 再拼一次
         assert_eq!(
-            resolved("/v1/v1/messages").url,
+            resolved(Provider::Anthropic, "/v1/v1/messages").url,
             "https://api.anthropic.com/v1/messages"
         );
     }
 
     #[test]
     fn anthropic_paths_keep_shape() {
-        let t = resolved("/v1/messages/count_tokens");
+        let t = resolved(Provider::Anthropic, "/v1/messages/count_tokens");
         assert_eq!(t.provider, Provider::Anthropic);
         assert_eq!(t.url, "https://api.anthropic.com/v1/messages/count_tokens");
-        assert_eq!(resolved("/v1/models").provider, Provider::Anthropic);
         assert_eq!(
-            resolved("/v1/models/claude-opus-5").url,
+            resolved(Provider::Anthropic, "/v1/models/claude-opus-5").url,
             "https://api.anthropic.com/v1/models/claude-opus-5"
         );
     }
 
     #[test]
     fn codex_paths_drop_v1_prefix() {
-        let t = resolved("/v1/responses");
+        let t = resolved(Provider::Codex, "/v1/responses");
         assert_eq!(t.provider, Provider::Codex);
         assert_eq!(t.url, "https://chatgpt.com/backend-api/codex/responses");
         assert_eq!(t.upstream_path, "/responses");
 
         assert_eq!(
-            resolved("/v1/responses/compact").url,
+            resolved(Provider::Codex, "/v1/responses/compact").url,
             "https://chatgpt.com/backend-api/codex/responses/compact"
         );
         assert_eq!(
-            resolved("/backend-api/codex/usage").url,
+            resolved(Provider::Codex, "/backend-api/codex/usage").url,
             "https://chatgpt.com/backend-api/codex/usage"
         );
     }
 
     #[test]
+    fn each_port_only_serves_its_own_provider() {
+        // 一个端口 = 一个 provider: 另一家的路径在本端口不存在
+        assert!(resolve(Provider::Anthropic, "/v1/responses", None).is_none());
+        assert!(resolve(Provider::Codex, "/v1/messages", None).is_none());
+        assert!(resolve(Provider::Anthropic, "/backend-api/codex/usage", None).is_none());
+    }
+
+    #[test]
+    fn wrong_port_hint_points_at_the_right_one() {
+        let hint = not_found_hint(Provider::Anthropic, "/v1/responses");
+        assert!(hint.contains("codex"), "{hint}");
+        assert!(hint.contains("127.0.0.1:10010"), "{hint}");
+
+        let hint = not_found_hint(Provider::Codex, "/v1/messages");
+        assert!(hint.contains("127.0.0.1:10011"), "{hint}");
+
+        // 两家都不认的路径 -> 列本端口可用路径
+        let hint = not_found_hint(Provider::Codex, "/embeddings");
+        assert!(hint.contains("/v1/responses"), "{hint}");
+    }
+
+    #[test]
     fn query_is_preserved_and_unknown_path_rejected() {
-        let t = resolve("/v1/models", Some("limit=5")).unwrap();
+        let t = resolve(Provider::Anthropic, "/v1/models", Some("limit=5")).unwrap();
         assert_eq!(t.url, "https://api.anthropic.com/v1/models?limit=5");
-        assert!(resolve("/v1/chat/completions", None).is_none());
-        assert!(resolve("/embeddings", None).is_none());
-        assert!(resolve("/v1/messagesfoo", None).is_none());
+        // chat/completions 由 server 层接走, 不进透传
+        assert!(resolve(Provider::Anthropic, "/v1/chat/completions", None).is_none());
+        assert!(resolve(Provider::Codex, "/v1/chat/completions", None).is_none());
+        assert!(resolve(Provider::Codex, "/embeddings", None).is_none());
+        assert!(resolve(Provider::Anthropic, "/v1/messagesfoo", None).is_none());
     }
 
     #[test]
@@ -659,7 +711,7 @@ mod tests {
 
     #[test]
     fn claude_code_prefix_injected_once() {
-        let t = resolved("/v1/messages");
+        let t = resolved(Provider::Anthropic, "/v1/messages");
 
         let (body, plan) = prepare_body(&t, Bytes::from(r#"{"model":"m","stream":true}"#));
         let v: Value = serde_json::from_slice(&body).unwrap();
@@ -678,7 +730,7 @@ mod tests {
 
     #[test]
     fn string_system_is_promoted_to_blocks() {
-        let t = resolved("/v1/messages");
+        let t = resolved(Provider::Anthropic, "/v1/messages");
         let (body, _) = prepare_body(&t, Bytes::from(r#"{"system":"be brief"}"#));
         let v: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(
@@ -690,7 +742,7 @@ mod tests {
 
     #[test]
     fn codex_body_meets_upstream_hard_requirements() {
-        let t = resolved("/v1/responses");
+        let t = resolved(Provider::Codex, "/v1/responses");
         let (body, plan) = prepare_body(&t, Bytes::from(r#"{"model":"m","input":"hi"}"#));
         let v: Value = serde_json::from_slice(&body).unwrap();
         // 上游只接受 SSE + 数组 input; 客户端没要流式 -> 由本层聚合
@@ -714,7 +766,7 @@ mod tests {
 
     #[test]
     fn compact_subresource_is_untouched() {
-        let t = resolved("/v1/responses/compact");
+        let t = resolved(Provider::Codex, "/v1/responses/compact");
         let raw = r#"{"model":"m"}"#;
         let (body, plan) = prepare_body(&t, Bytes::from(raw));
         assert_eq!(body, Bytes::from(raw));
@@ -753,7 +805,7 @@ mod tests {
 
     #[test]
     fn non_json_body_passes_through() {
-        let t = resolved("/v1/messages");
+        let t = resolved(Provider::Anthropic, "/v1/messages");
         let raw = Bytes::from_static(b"not json");
         let (body, plan) = prepare_body(&t, raw.clone());
         assert_eq!(body, raw);

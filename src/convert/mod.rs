@@ -50,18 +50,10 @@ fn translator(p: Provider) -> Box<dyn Translate> {
     }
 }
 
-/// model -> provider。允许 `anthropic/xxx` 这类前缀 (部分客户端会带)。
-pub fn route(model: &str) -> Option<(Provider, &str)> {
+/// 取模型名: provider 已由端口定死, 只需剥掉 `anthropic/xxx` 这类前缀 (部分客户端会带)。
+pub fn model_name(model: &str) -> Option<&str> {
     let name = model.rsplit('/').next().unwrap_or(model).trim();
-    if name.is_empty() {
-        return None;
-    }
-    let p = if name.to_ascii_lowercase().starts_with("claude") {
-        Provider::Anthropic
-    } else {
-        Provider::Codex
-    };
-    Some((p, name))
+    (!name.is_empty()).then_some(name)
 }
 
 /// 组装上游请求体 (已含 stream=true 等硬要求)。
@@ -460,18 +452,15 @@ mod tests {
     }
 
     #[test]
-    fn model_routes_by_family() {
-        assert_eq!(route("claude-opus-5").unwrap().0, Provider::Anthropic);
+    fn model_name_strips_vendor_prefix() {
+        assert_eq!(model_name("claude-opus-5"), Some("claude-opus-5"));
         assert_eq!(
-            route("anthropic/claude-sonnet-5").unwrap(),
-            (Provider::Anthropic, "claude-sonnet-5")
+            model_name("anthropic/claude-sonnet-5"),
+            Some("claude-sonnet-5")
         );
-        assert_eq!(route("gpt-5.6-sol").unwrap().0, Provider::Codex);
-        assert_eq!(
-            route("openai/gpt-5.5").unwrap(),
-            (Provider::Codex, "gpt-5.5")
-        );
-        assert!(route("  ").is_none());
+        assert_eq!(model_name("openai/gpt-5.5"), Some("gpt-5.5"));
+        assert_eq!(model_name(" gpt-5.6-sol "), Some("gpt-5.6-sol"));
+        assert!(model_name("  ").is_none());
     }
 
     #[test]

@@ -1,11 +1,11 @@
-//! api key 兼容端口: 业务按官方 api key 方式调用 -> proxy 换成 CLI (OAuth) 渠道。
+//! 端口层: 一个端口一个 provider, 业务按官方 api key 方式调用 -> proxy 换成 CLI (OAuth) 渠道。
 //!
 //! 客户端全程以为自己在直连官方付费 api, 因此:
 //! - 两家 base url 约定 (域名根 / `.../v1`) 都要通 -> 路径先归一
-//! - 同一个 `/models` 按客户端方言给各自的官方形状
+//! - `/models` 按客户端方言给官方形状
 //! - 自产错误也按方言裹官方信封
 //!
-//! 其余路径落回原生透传, 业务把 base url 全指本端口即可。
+//! 本层只接 Chat Completions 与模型列表, 其余路径落回原生透传。
 
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
@@ -21,19 +21,19 @@ use serde_json::{json, Value};
 
 use crate::convert;
 use crate::provider::{self, Provider};
-use crate::proxy::{self, json_body, App, Dialect};
+use crate::proxy::{self, json_body, App, Dialect, Port};
 use crate::store::now;
 
-pub fn router(app: Arc<App>) -> Router {
+pub fn router(port: Port) -> Router {
     Router::new()
         .fallback(any(dispatch))
         .layer(DefaultBodyLimit::disable())
         .layer(proxy::cors())
-        .with_state(app)
+        .with_state(port)
 }
 
 async fn dispatch(
-    state: State<Arc<App>>,
+    state: State<Port>,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
@@ -44,14 +44,16 @@ async fn dispatch(
         return r;
     }
     let path = proxy::strip_v1(uri.path());
-    let openai_get = dialect == Dialect::OpenAI && method == Method::GET;
+    // Anthropic 方言在 claude 端口落回透传 -> 拿到官方原样形状;
+    // codex 上游 `/models` 不是官方 OpenAI 形状 -> 该端口一律由本层出列表。
+    let openai_list =
+        method == Method::GET && (dialect == Dialect::OpenAI || state.provider == Provider::Codex);
 
     match path {
         "/health" => proxy::health(state).await,
         "/chat/completions" if method == Method::POST => chat_completions(state, body).await,
-        // Anthropic 方言的 /models 落回透传 -> 拿到的是官方原样形状
-        "/models" if openai_get => openai_models(state).await,
-        p if openai_get && p.starts_with("/models/") => {
+        "/models" if openai_list => openai_models(state).await,
+        p if openai_list && p.starts_with("/models/") => {
             openai_model(state, &p["/models/".len()..]).await
         }
         _ => proxy::handle(state, method, uri, headers, body).await,
@@ -60,15 +62,17 @@ async fn dispatch(
 
 // ---------- Chat Completions ----------
 
-async fn chat_completions(State(app): State<Arc<App>>, body: Bytes) -> Response {
+/// provider 由端口定, model 只取名字 (允许 `openai/`、`anthropic/` 前缀)。
+async fn chat_completions(State(port): State<Port>, body: Bytes) -> Response {
+    let p = port.provider;
     let bad = |msg: &str| Dialect::OpenAI.error(StatusCode::BAD_REQUEST, "invalid_request", msg);
     let Ok(req) = serde_json::from_slice::<Value>(&body) else {
         return bad("请求体不是合法 JSON");
     };
-    let Some((p, model)) = req
+    let Some(model) = req
         .get("model")
         .and_then(Value::as_str)
-        .and_then(convert::route)
+        .and_then(convert::model_name)
     else {
         return bad("model 必填; 可用取值见 GET /v1/models");
     };
@@ -97,7 +101,7 @@ async fn chat_completions(State(app): State<Arc<App>>, body: Bytes) -> Response 
     let started = Instant::now();
     // 上游一律 SSE: 客户端要非流式时由转换层聚合。
     let resp = match proxy::upstream(
-        &app,
+        &port.app,
         p,
         Method::POST,
         &url,
@@ -155,29 +159,31 @@ async fn upstream_error(resp: reqwest::Response) -> Response {
 
 // ---------- 模型列表 (OpenAI 方言) ----------
 
-async fn openai_models(State(app): State<Arc<App>>) -> Response {
-    let (anthropic, codex) =
-        tokio::join!(list(&app, Provider::Anthropic), list(&app, Provider::Codex));
-    let data: Vec<Value> = anthropic.into_iter().chain(codex).collect();
+async fn openai_models(State(port): State<Port>) -> Response {
+    let data = list(&port.app, port.provider).await;
     json_body(StatusCode::OK, json!({ "object": "list", "data": data }))
 }
 
-async fn openai_model(State(app): State<Arc<App>>, id: &str) -> Response {
-    let Some((p, name)) = convert::route(id) else {
+async fn openai_model(State(port): State<Port>, id: &str) -> Response {
+    let Some(name) = convert::model_name(id) else {
         return Dialect::OpenAI.error(StatusCode::NOT_FOUND, "not_found", "model 不存在");
     };
-    match list(&app, p).await.into_iter().find(|m| m["id"] == name) {
+    match list(&port.app, port.provider)
+        .await
+        .into_iter()
+        .find(|m| m["id"] == name)
+    {
         Some(m) => json_body(StatusCode::OK, m),
         None => Dialect::OpenAI.error(
             StatusCode::NOT_FOUND,
             "not_found",
-            &format!("model `{id}` 不在可用列表中"),
+            &format!("model `{id}` 不在 {} 端口的可用列表中", port.provider),
         ),
     }
 }
 
-/// 单家取不到不影响另一家 -> 列表尽力而为。
-async fn list(app: &App, p: Provider) -> Vec<Value> {
+/// 取不到不报错 -> 列表尽力而为。
+async fn list(app: &Arc<App>, p: Provider) -> Vec<Value> {
     let (url, list_key, id_key, owner) = match p {
         Provider::Anthropic => (
             format!("{}/v1/models?limit=1000", provider::ANTHROPIC_UPSTREAM),

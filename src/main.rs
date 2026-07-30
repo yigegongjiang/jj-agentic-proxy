@@ -1,11 +1,11 @@
 //! 本机 agentic proxy: 复用自有订阅, 以官方协议暴露 Anthropic / OpenAI Codex 端点。
 
 mod auth;
-mod compat;
 mod convert;
 mod oauth;
 mod provider;
 mod proxy;
+mod server;
 mod sse;
 mod store;
 
@@ -35,17 +35,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// 启动代理 (默认命令)
-    Serve {
-        #[arg(long, default_value = "127.0.0.1")]
-        host: String,
-        /// 原生协议端口 (官方 body 原样透传)
-        #[arg(long, short, default_value_t = 10000)]
-        port: u16,
-        /// api key 兼容端口 (Chat Completions + 原生); 0 = 关闭
-        #[arg(long, default_value_t = 10001)]
-        compat_port: u16,
-    },
+    /// 启动代理 (默认命令): codex 10010 + claude-code 10011, 端口固定
+    Serve,
     /// Web OAuth 授权: anthropic | codex
     Login { provider: String },
     /// 删除本地凭证: anthropic | codex | all
@@ -57,26 +48,16 @@ enum Cmd {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    match cli.cmd.unwrap_or(Cmd::Serve {
-        host: "127.0.0.1".into(),
-        port: 10000,
-        compat_port: 10001,
-    }) {
-        Cmd::Serve {
-            host,
-            port,
-            compat_port,
-        } => serve(host, port, compat_port).await,
+    match cli.cmd.unwrap_or(Cmd::Serve) {
+        Cmd::Serve => serve().await,
         Cmd::Login { provider } => login(&provider).await,
         Cmd::Logout { provider } => logout(&provider),
         Cmd::Status => status(),
     }
 }
 
-async fn serve(host: String, port: u16, compat_port: u16) -> Result<()> {
-    if compat_port == port {
-        bail!("--compat-port 不能与 --port 相同");
-    }
+/// 一个 provider 一个固定端口 -> 客户端 base url 写死即可, 无需任何参数。
+async fn serve() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
@@ -102,45 +83,47 @@ async fn serve(host: String, port: u16, compat_port: u16) -> Result<()> {
         http,
         session_id: new_session_id(),
     });
-    let native = bind(&host, port).await?;
-    tracing::info!("native  listening on http://{host}:{port} (官方协议原样透传)");
-    let native = tokio::spawn(
-        axum::serve(native, proxy::router(app.clone()))
-            .with_graceful_shutdown(shutdown())
-            .into_future(),
-    );
 
-    let compat = match compat_port {
-        0 => None,
-        p => {
-            let l = bind(&host, p).await?;
-            tracing::info!(
-                "compat  listening on http://{host}:{p} (api key 风格; 含 /v1/chat/completions)"
-            );
-            Some(tokio::spawn(
-                axum::serve(l, compat::router(app))
+    // 先全部 bind 再 serve: 端口被占用要立刻失败, 不留半个可用端口的中间态。
+    let mut bound = Vec::new();
+    for p in Provider::ALL {
+        bound.push((p, bind(p.port()).await?));
+    }
+
+    let mut tasks = Vec::new();
+    for (p, listener) in bound {
+        tracing::info!("{p:<9} listening on http://{}:{}", provider::HOST, p.port());
+        let port = proxy::Port {
+            app: app.clone(),
+            provider: p,
+        };
+        tasks.push((
+            p,
+            tokio::spawn(
+                axum::serve(listener, server::router(port))
                     .with_graceful_shutdown(shutdown())
                     .into_future(),
-            ))
-        }
-    };
+            ),
+        ));
+    }
 
-    native
-        .await
-        .context("原生端口任务异常")?
-        .context("原生端口服务异常退出")?;
-    if let Some(task) = compat {
+    for (p, task) in tasks {
         task.await
-            .context("兼容端口任务异常")?
-            .context("兼容端口服务异常退出")?;
+            .with_context(|| format!("{p} 端口任务异常"))?
+            .with_context(|| format!("{p} 端口服务异常退出"))?;
     }
     Ok(())
 }
 
-async fn bind(host: &str, port: u16) -> Result<tokio::net::TcpListener> {
-    tokio::net::TcpListener::bind((host, port))
+async fn bind(port: u16) -> Result<tokio::net::TcpListener> {
+    tokio::net::TcpListener::bind((provider::HOST, port))
         .await
-        .with_context(|| format!("监听 {host}:{port} 失败"))
+        .with_context(|| {
+            format!(
+                "监听 {}:{port} 失败 (端口固定, 需先释放占用)",
+                provider::HOST
+            )
+        })
 }
 
 async fn login(name: &str) -> Result<()> {

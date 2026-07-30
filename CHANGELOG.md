@@ -14,6 +14,22 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-31
+
+### Changed
+
+- 端口改为一个 provider 一个: codex `10010`、claude-code `10011`, 写死不可改; 原 `10000` / `10001` 全部废弃
+- 请求走哪家订阅只看端口, 不再看 model 名; 路径走错端口时的报错会直接给出正确端口
+- `/v1/models` 只列本端口 provider 的模型; `/health` 改为汇报本端口的 provider 与可用路径
+
+### Removed
+
+- `serve` 的 `--host` / `--port` / `--compat-port` 参数 (端口固定, 无需配置)
+
+### Fixed
+
+- 带 `max_tokens` 调 codex 不再被上游拒绝 (ChatGPT 订阅后端不接受 token 上限)
+
 ## [0.3.2] - 2026-07-31
 
 ### Fixed
@@ -65,7 +81,8 @@
 - 凭证到期前自动续期, 上游拒绝时自动重试一次, 无需手工介入
 - 流式回答逐块透传, 首字延迟与官方 CLI 一致
 
-[Unreleased]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/yigegongjiang/jj-agentic-proxy/releases/tag/v0.3.0
