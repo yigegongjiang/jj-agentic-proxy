@@ -76,11 +76,8 @@ pub fn anthropic_redirect_uri() -> String {
     format!("http://localhost:{ANTHROPIC_CALLBACK_PORT}{ANTHROPIC_CALLBACK_PATH}")
 }
 
-/// `claude-cli/<ver> (external, cli)`; 版本可用 `JJ_PROXY_CLAUDE_CLI_VERSION` 覆盖。
-pub fn claude_user_agent() -> String {
-    let ver = std::env::var("JJ_PROXY_CLAUDE_CLI_VERSION").unwrap_or_else(|_| "2.1.88".to_string());
-    format!("claude-cli/{ver} (external, cli)")
-}
+/// 上游只校验客户端身份 (OAuth + system 前缀), 不校验 claude-cli 版本 -> 固定值即可。
+pub const CLAUDE_USER_AGENT: &str = "claude-cli/2.1.88 (external, cli)";
 
 // ---------- OpenAI Codex CLI ----------
 

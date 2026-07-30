@@ -552,7 +552,7 @@ fn normalize_codex(obj: &mut Map<String, Value>) -> bool {
 fn anthropic_headers(token: &str, client: &HeaderMap, stream: bool) -> HeaderMap {
     let mut h = HeaderMap::new();
     set(&mut h, AUTHORIZATION, &format!("Bearer {token}"));
-    set(&mut h, USER_AGENT, &provider::claude_user_agent());
+    set(&mut h, USER_AGENT, provider::CLAUDE_USER_AGENT);
     set(&mut h, CONTENT_TYPE, "application/json");
     set(&mut h, ACCEPT, accept_for(stream));
     set_name(&mut h, "anthropic-version", provider::ANTHROPIC_API_VERSION);

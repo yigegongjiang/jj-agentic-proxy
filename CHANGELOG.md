@@ -14,6 +14,12 @@
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-07-31
+
+### Removed
+
+- 去掉两个无实际用途的环境变量: `JJ_PROXY_CLAUDE_CLI_VERSION` (上游不校验该版本) 与 `JJ_PROXY_CONFIG_DIR` (凭证目录改用 `XDG_CONFIG_HOME`)
+
 ## [0.4.1] - 2026-07-31
 
 ### Fixed
@@ -91,7 +97,8 @@
 - 凭证到期前自动续期, 上游拒绝时自动重试一次, 无需手工介入
 - 流式回答逐块透传, 首字延迟与官方 CLI 一致
 
-[Unreleased]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.3.1...v0.3.2

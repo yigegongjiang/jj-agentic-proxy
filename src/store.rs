@@ -43,12 +43,6 @@ pub fn now() -> u64 {
 }
 
 pub fn config_dir() -> PathBuf {
-    if let Some(dir) = std::env::var("JJ_PROXY_CONFIG_DIR")
-        .ok()
-        .filter(|dir| !dir.is_empty())
-    {
-        return PathBuf::from(dir);
-    }
     let base = std::env::var("XDG_CONFIG_HOME")
         .ok()
         .filter(|dir| !dir.is_empty())
