@@ -27,10 +27,12 @@ jj-agentic-proxy login codex      # 同上
 jj-agentic-proxy                  # = start, 后台常驻 (10010 + 10011 + 10012); 已在运行则先停再起
 jj-agentic-proxy stop             # 停止
 jj-agentic-proxy status           # 运行中/未运行 + 凭证账号 / 套餐 / 到期
+jj-agentic-proxy models           # 两家订阅当前可用 model + 各自端口
 jj-agentic-proxy logout all       # anthropic | codex | all
 ```
 
 - 后台常驻: 脱离终端 (关掉 shell 不影响), 日志落 `~/.config/jj-agentic-proxy/daemon.log`
+- `models` 直接问上游, 与后台是否在跑无关; 结果同 `GET /v1/models`
 - `start` = restart: 已在运行则先 stop 再起新进程 -> 升级 / 换版本后一条命令即生效, 永不出现两个实例
 - 被外部程序占了固定端口时 start 直接失败并回显日志尾部
 

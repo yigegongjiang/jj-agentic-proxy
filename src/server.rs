@@ -170,8 +170,8 @@ fn owner_of(p: Provider) -> &'static str {
     }
 }
 
-/// 取不到不报错 -> 列表尽力而为。
-async fn list(app: &Arc<App>, p: Provider) -> Vec<Value> {
+/// 取不到不报错 -> 列表尽力而为。CLI 的 `models` 子命令复用同一份结果。
+pub(crate) async fn list(app: &Arc<App>, p: Provider) -> Vec<Value> {
     let owner = owner_of(p);
     let (url, list_key, id_key) = match p {
         Provider::Anthropic => (

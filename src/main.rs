@@ -50,6 +50,8 @@ enum Cmd {
     Logout { provider: String },
     /// 查看运行与凭证状态
     Status,
+    /// 列出两家订阅当前可用的 model
+    Models,
 }
 
 #[tokio::main]
@@ -62,6 +64,7 @@ async fn main() -> Result<()> {
         Cmd::Login { provider } => login(&provider).await,
         Cmd::Logout { provider } => logout(&provider),
         Cmd::Status => status(),
+        Cmd::Models => models().await,
     }
 }
 
@@ -214,6 +217,38 @@ fn status() -> Result<()> {
                     c.plan.as_deref().unwrap_or("-"),
                 );
             }
+        }
+    }
+    Ok(())
+}
+
+/// 直接拿本机凭证问上游要列表 -> 与后台是否在跑无关, 结果和 `GET /v1/models` 同源。
+async fn models() -> Result<()> {
+    let http = http_client()?;
+    let auth = AuthManager::load(http.clone())?;
+    let app = Arc::new(proxy::App {
+        auth,
+        http,
+        session_id: new_session_id(),
+    });
+    for p in Provider::ALL {
+        let ports = Surface::ALL
+            .iter()
+            .filter(|s| s.provider() == p)
+            .map(|s| s.port().to_string())
+            .collect::<Vec<_>>()
+            .join(" / ");
+        println!("{p} (端口 {ports})");
+        if app.auth.snapshot(p).await.is_none() {
+            println!("  未登录 (`jj-agentic-proxy login {p}`)");
+            continue;
+        }
+        let list = server::list(&app, p).await;
+        if list.is_empty() {
+            println!("  取不到列表 (上游异常或凭证失效)");
+        }
+        for m in &list {
+            println!("  {}", m["id"].as_str().unwrap_or("-"));
         }
     }
     Ok(())
