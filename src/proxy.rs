@@ -446,21 +446,29 @@ fn prepare_body(target: &Target, body: Bytes) -> (Bytes, Plan) {
 
     let (changed, plan) = match target.surface {
         // OAuth 凭证只被授权用于 Claude Code, system 必须带 CLI 前缀。
-        Surface::ClaudeCode if target.upstream_path.starts_with("/v1/messages") => (
-            inject_claude_code_prefix(obj),
-            Plan {
-                upstream_stream: client_stream,
-                aggregate_responses: false,
-            },
-        ),
+        Surface::ClaudeCode if target.upstream_path.starts_with("/v1/messages") => {
+            let injected = inject_claude_code_prefix(obj);
+            let dropped = drop_sampling_params(obj);
+            (
+                injected || dropped,
+                Plan {
+                    upstream_stream: client_stream,
+                    aggregate_responses: false,
+                },
+            )
+        }
         // 官方兼容层把所有 system 消息拼成单块 -> 客户端的 system 必须挪出该通道。
-        Surface::ClaudeOpenAI => (
-            hoist_system_out_of_the_way(obj),
-            Plan {
-                upstream_stream: client_stream,
-                aggregate_responses: false,
-            },
-        ),
+        Surface::ClaudeOpenAI => {
+            let hoisted = hoist_system_out_of_the_way(obj);
+            let dropped = drop_sampling_params(obj);
+            (
+                hoisted || dropped,
+                Plan {
+                    upstream_stream: client_stream,
+                    aggregate_responses: false,
+                },
+            )
+        }
         // /codex/responses 只接受 SSE + 不落库 + instructions 必填 + input 必须是数组。
         Surface::Codex if target.upstream_path == "/responses" => (
             normalize_codex(obj),
@@ -486,6 +494,22 @@ fn prepare_body(target: &Target, body: Bytes) -> (Bytes, Plan) {
     } else {
         (body, plan)
     }
+}
+
+/// 采样参数: Anthropic 自 Opus 4.7 起在新模型上按「键是否存在」硬拒 (取值无关),
+/// 报 400 "`temperature` is deprecated for this model"; 官方 OpenAI 兼容层原样透传该限制。
+pub(crate) const SAMPLING_KEYS: [&str; 3] = ["temperature", "top_p", "top_k"];
+
+/// 一律丢弃采样参数: 受限模型名单随新模型持续扩张, 做模型名判断必然过期 ->
+/// 统一丢弃 (仅老模型损失采样控制, 换取任何客户端都不会整条请求 400)。
+fn drop_sampling_params(obj: &mut Map<String, Value>) -> bool {
+    let mut changed = false;
+    for k in SAMPLING_KEYS {
+        if obj.remove(k).is_some() {
+            changed = true;
+        }
+    }
+    changed
 }
 
 pub(crate) fn inject_claude_code_prefix(obj: &mut Map<String, Value>) -> bool {
@@ -1009,6 +1033,27 @@ mod tests {
         let (once, _) = prepare_body(&t, Bytes::from(raw));
         let (twice, _) = prepare_body(&t, once.clone());
         assert_eq!(once, twice);
+    }
+
+    /// 新模型按「键存在」硬拒采样参数 -> 两条 Anthropic 透传面都必须先剥掉, 否则整条请求 400。
+    #[test]
+    fn anthropic_surfaces_drop_sampling_params() {
+        let raw = r#"{"model":"m","temperature":0.3,"top_p":0.9,"top_k":40,
+            "max_tokens":64,"messages":[{"role":"user","content":"hi"}]}"#;
+        for path in [
+            (Surface::ClaudeOpenAI, "/v1/chat/completions"),
+            (Surface::ClaudeCode, "/v1/messages"),
+            (Surface::ClaudeCode, "/v1/messages/count_tokens"),
+        ] {
+            let t = resolved(path.0, path.1);
+            let (body, _) = prepare_body(&t, Bytes::from(raw));
+            let v: Value = serde_json::from_slice(&body).unwrap();
+            for k in SAMPLING_KEYS {
+                assert!(v.get(k).is_none(), "{} {k} 应被丢弃", path.1);
+            }
+            // 其余字段不受影响
+            assert_eq!(v["max_tokens"], json!(64));
+        }
     }
 
     #[test]

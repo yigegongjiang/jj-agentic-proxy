@@ -80,9 +80,7 @@ pub fn request(req: &Value, model: &str) -> Value {
     }
     out.insert("max_tokens".into(), json!(limit));
 
-    // 采样参数 (temperature / top_p / top_k) 一律不转发: 上游自 Opus 4.7 起在所有新模型上
-    // 硬拒 ("`temperature` is deprecated for this model", 400), 且名单随新模型持续变化 ->
-    // 不做模型名判断, 统一丢弃 (仅老模型损失采样控制, 换取任何客户端都不会整条请求失败)。
+    // 白名单重建 -> 客户端的采样参数 (见 proxy::SAMPLING_KEYS) 天然不转发, 与透传面一致。
     let mut cfg = Map::new();
     if let Some(e) = effort {
         cfg.insert("effort".into(), json!(e));

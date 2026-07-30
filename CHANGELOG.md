@@ -14,6 +14,17 @@
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-07-31
+
+### Changed
+
+- `start` 自带重启: 已在运行时先停旧进程再起新的, 不再直接返回「已在运行」
+- 升级 / 换版本后只需一条 `start`, 无需先手动 `stop`
+
+### Fixed
+
+- 客户端带 `temperature` / `top_p` / `top_k` 时新模型 (Sonnet 5 / Opus 5 等) 整条请求 400 `` `temperature` is deprecated for this model ``: 三条 Claude 路径统一丢弃这些参数
+
 ## [0.5.0] - 2026-07-31
 
 ### Added

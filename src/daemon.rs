@@ -62,10 +62,12 @@ pub fn running() -> Result<Option<u32>> {
 }
 
 /// 脱离终端启动, 等就绪标记后才报成功。
+///
+/// 自带 restart 语义: 已在运行 -> 先 stop 再起新进程。升级 / 改配置后一条 `start` 即生效,
+/// 无需人工 stop; 也避免旧进程占着端口让新进程 bind 失败。
 pub fn start() -> Result<()> {
-    if let Some(pid) = running()? {
-        println!("已在运行 (pid {pid})");
-        return Ok(());
+    if running()?.is_some() {
+        stop()?;
     }
     let exe = std::env::current_exe().context("定位自身可执行文件失败")?;
     let log = log_path();

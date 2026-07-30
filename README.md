@@ -24,14 +24,15 @@ curl -fsSL https://raw.githubusercontent.com/yigegongjiang/jj-agentic-proxy/mast
 ```bash
 jj-agentic-proxy login anthropic  # 浏览器授权; token 落 ~/.config/jj-agentic-proxy/auth.json (0600)
 jj-agentic-proxy login codex      # 同上
-jj-agentic-proxy                  # = start, 后台常驻 (10010 + 10011 + 10012)
-jj-agentic-proxy stop             # 停止; 重启 = stop + start
+jj-agentic-proxy                  # = start, 后台常驻 (10010 + 10011 + 10012); 已在运行则先停再起
+jj-agentic-proxy stop             # 停止
 jj-agentic-proxy status           # 运行中/未运行 + 凭证账号 / 套餐 / 到期
 jj-agentic-proxy logout all       # anthropic | codex | all
 ```
 
 - 后台常驻: 脱离终端 (关掉 shell 不影响), 日志落 `~/.config/jj-agentic-proxy/daemon.log`
-- 重复 `start` 不会起第二个实例; 端口被占用时 start 直接失败并回显日志尾部
+- `start` = restart: 已在运行则先 stop 再起新进程 -> 升级 / 换版本后一条命令即生效, 永不出现两个实例
+- 被外部程序占了固定端口时 start 直接失败并回显日志尾部
 
 ## 端口 (一个端口一个协议面)
 
@@ -65,8 +66,9 @@ jj-agentic-proxy logout all       # anthropic | codex | all
 
 - Chat Completions 的上游由端口决定, `model` 只取模型名 (允许 `anthropic/`、`openai/` 前缀)
 - 10010 / 10011 本地转换覆盖: 流式 / 非流式、tools + 工具结果回传、图片 (url 与 data URI)、`response_format`、`reasoning_effort`; 思考内容出 `reasoning_content`
-- 10011 的 Chat Completions 丢弃采样参数 (`temperature` / `top_p` / `top_k`): 上游新模型一律硬拒, 转发必然 400; `reasoning_effort` 映射成上游现行思考档位
-- 10012 只有 Chat Completions 与模型列表 (原生 Messages 走 10011), 字段支持度以[上游兼容层](https://platform.claude.com/docs/en/api/openai-sdk)为准: 无 `reasoning_content`, `response_format` / `reasoning_effort` / `seed` 等被上游静默忽略, `temperature` 上限 1
+- 采样参数 (`temperature` / `top_p` / `top_k`) 在所有 Anthropic 面 (10011 原生 + 10011/10012 Chat Completions) 一律丢弃: 上游新模型按「键是否存在」硬拒 (400 `` `temperature` is deprecated ``), 与取值无关, 且受限名单随新模型扩张 -> 不做模型名判断
+- 10011 的 Chat Completions 把 `reasoning_effort` 映射成上游现行思考档位
+- 10012 只有 Chat Completions 与模型列表 (原生 Messages 走 10011), 字段支持度以[上游兼容层](https://platform.claude.com/docs/en/api/openai-sdk)为准: 无 `reasoning_content`, `response_format` / `reasoning_effort` / `seed` 等被上游静默忽略
 - `/v1/models` 形状: 10011 带 `x-api-key` / `anthropic-version` -> Anthropic 官方原样; 其余 (含 10010 / 10012) -> OpenAI 列表, 只含本端口订阅的模型
 - 错误一律按方言裹官方信封 (`{"type":"error",...}` / `{"error":{...}}`); 上游已给官方形状则原样透传, 保留 `request-id` 等头
 - 额度查 `10010/backend-api/codex/usage`

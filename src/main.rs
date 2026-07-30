@@ -37,7 +37,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// 启动 (默认命令): 后台常驻, codex 10010 + claude-code 10011, 端口固定
+    /// 启动 (默认命令): 后台常驻, 端口固定; 已在运行则先停再起 (= restart)
     Start,
     /// 停止
     Stop,

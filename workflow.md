@@ -57,7 +57,7 @@ cargo build --release
 - 验证: 脚本输出的 `--version` 与本次 tag 一致
 
 > MUST NOT 改回 `cp` 原地覆盖: macOS 会因代码签名缓存失效直接 `Killed: 9`。
-> 正在运行的旧进程需自行停止后再验证新版本。
+> 旧进程仍在跑时: 装完执行 `jj-agentic-proxy start` 即切到新版本 (start 自带 restart)。
 
 ## 4. 发布
 
