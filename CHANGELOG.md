@@ -14,6 +14,21 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-31
+
+### Added
+
+- 往返记录补齐 header: 客户端的请求 / 响应 header 全量记下, 并新增「代理发给上游」那一腿 (注入后的 header、被改写的请求体、上游响应 header 含限流与 request-id)
+- 查看器改为 HTTP 报文视图 (起始行 + header + body), 一键切换 `Client ↔ Proxy` / `Proxy ↔ Upstream` 对照同一条往返
+
+### Changed
+
+- macOS 查看器新增专属 app icon
+
+### Security
+
+- 记录文件权限收紧为 0600 (内含原样授权头, 与凭证文件同级)
+
 ## [0.6.0] - 2026-07-31
 
 ### Added
@@ -188,7 +203,9 @@
 - 凭证到期前自动续期, 上游拒绝时自动重试一次, 无需手工介入
 - 流式回答逐块透传, 首字延迟与官方 CLI 一致
 
-[Unreleased]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.5.5...HEAD
+[Unreleased]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.5.5...v0.6.0
 [0.5.5]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.5.4...v0.5.5
 [0.4.5]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.4.3...v0.4.4
