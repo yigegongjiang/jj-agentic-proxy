@@ -1,8 +1,18 @@
 #!/usr/bin/env bash
-# Build jj-agentic-proxy locally in release mode and install it to ~/.local/bin — for local verification.
-# Usage: ./scripts/install-local.sh   (run from anywhere; script cd's to the repo root automatically)
+# Build jj-agentic-proxy locally in release mode: CLI → ~/.local/bin, then the macOS app → /Applications.
+# Usage: ./scripts/install-local.sh [--cli-only]   (run from anywhere; script cd's to the repo root automatically)
+#   --cli-only   skip the app build/packaging step (app/package.sh)
 
 set -euo pipefail
+
+CLI_ONLY=0
+for arg in "$@"; do
+  case "$arg" in
+    --cli-only) CLI_ONLY=1 ;;
+    -h|--help) echo "usage: $0 [--cli-only]"; exit 0 ;;
+    *) echo "unknown option: $arg (usage: $0 [--cli-only])" >&2; exit 2 ;;
+  esac
+done
 
 cd "$(dirname "$0")/.."
 
@@ -31,3 +41,11 @@ esac
 
 echo "==> Verifying"
 "${INSTALL_DIR}/${BIN_NAME}" --version
+
+if [ "$CLI_ONLY" = 1 ]; then
+  echo "==> Skipping app (--cli-only)"
+  exit 0
+fi
+
+echo
+./app/package.sh

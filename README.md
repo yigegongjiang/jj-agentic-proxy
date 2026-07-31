@@ -158,10 +158,10 @@ src/auth.rs               凭证内存态 + 到期预判 + 单飞刷新
 src/oauth.rs              PKCE + 本机回调服务 + 两家 token 换取/刷新
 src/provider.rs           协议面 <-> 端口 / 订阅映射 + 两家上游常量 (client_id / endpoint / CLI 冒充参数)
 src/store.rs              auth.json 读写 (原子 + 0600)
-scripts/install-local.sh  本机 release 构建 + 安装 (预部署)
+scripts/install-local.sh  预部署总入口: CLI release 构建 + 安装 -> 续跑 app/package.sh (`--cli-only` 只装 CLI)
 
 app/Package.swift         查看器 app: SwiftPM executable (macOS 13+, AppKit)
-app/package.sh            Release 构建 + 组装 .app + ad-hoc 签名 + 装 /Applications (版本取自 Cargo.toml)
+app/package.sh            Release 构建 + 组装 .app + ad-hoc 签名 + 装 /Applications (版本取自 Cargo.toml; 被 install-local.sh 调用)
 app/Resources/            bundle 模板 (Info.plist.in, `@VERSION@` 占位)
 app/Sources/jj-agentic-proxy/
   main.swift              入口 + `--snapshot <png>` 界面自检
