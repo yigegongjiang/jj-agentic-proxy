@@ -16,6 +16,7 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
     private var followTimer: Timer?
     private var cliOutput = ""
     private var dividersPlaced = false
+    private var detail: TrafficReader.Detail?
 
     // MARK: 视图
     private let dot = NSTextField(labelWithString: "●")
@@ -30,6 +31,8 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
     private let countLabel = NSTextField(labelWithString: "")
     private let tableView = NSTableView()
     private let metaLabel = NSTextField(labelWithString: "")
+    private let legPicker = NSSegmentedControl(labels: ["Client ↔ Proxy", "Proxy ↔ Upstream"],
+                                               trackingMode: .selectOne, target: nil, action: nil)
     private let reqPane = BodyPane(title: "Request")
     private let resPane = BodyPane(title: "Response")
     private let mainSplit = NSSplitView()
@@ -166,6 +169,14 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         metaLabel.lineBreakMode = .byTruncatingTail
         metaLabel.translatesAutoresizingMaskIntoConstraints = false
 
+        // 同一条往返的两条腿: 客户端看到的 vs 代理真正发给上游的 (header 已注入 / body 可能被改写)
+        legPicker.selectedSegment = 0
+        legPicker.segmentStyle = .rounded
+        legPicker.font = .systemFont(ofSize: 11)
+        legPicker.target = self
+        legPicker.action = #selector(legChanged)
+        legPicker.translatesAutoresizingMaskIntoConstraints = false
+
         detailSplit.isVertical = false // 上下: Request / Response
         detailSplit.dividerStyle = .thin
         detailSplit.delegate = self
@@ -175,12 +186,15 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
 
         let detail = NSView()
         detail.addSubview(metaLabel)
+        detail.addSubview(legPicker)
         detail.addSubview(detailSplit)
         NSLayoutConstraint.activate([
             metaLabel.topAnchor.constraint(equalTo: detail.topAnchor, constant: 4),
             metaLabel.leadingAnchor.constraint(equalTo: detail.leadingAnchor, constant: 10),
             metaLabel.trailingAnchor.constraint(equalTo: detail.trailingAnchor, constant: -10),
-            detailSplit.topAnchor.constraint(equalTo: metaLabel.bottomAnchor, constant: 6),
+            legPicker.topAnchor.constraint(equalTo: metaLabel.bottomAnchor, constant: 6),
+            legPicker.leadingAnchor.constraint(equalTo: detail.leadingAnchor, constant: 10),
+            detailSplit.topAnchor.constraint(equalTo: legPicker.bottomAnchor, constant: 6),
             detailSplit.leadingAnchor.constraint(equalTo: detail.leadingAnchor),
             detailSplit.trailingAnchor.constraint(equalTo: detail.trailingAnchor),
             detailSplit.bottomAnchor.constraint(equalTo: detail.bottomAnchor),
@@ -398,6 +412,7 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
 
     private func showDetail(_ rec: TrafficRecord?) {
         detailToken += 1
+        detail = nil
         guard let rec else {
             metaLabel.stringValue = ""
             reqPane.text = ""
@@ -415,13 +430,31 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         let token = detailToken
         let target = day
         Task.detached(priority: .userInitiated) {
-            let detail = TrafficReader.detail(day: target, offset: rec.offset, length: rec.length)
+            let loaded = TrafficReader.detail(day: target, offset: rec.offset, length: rec.length)
             await MainActor.run {
                 guard token == self.detailToken else { return } // 期间又换了选中行
-                self.reqPane.text = detail.request
-                self.resPane.text = detail.response
+                self.detail = loaded
+                self.renderDetail()
             }
         }
+    }
+
+    /// 两条腿共用同一对面板: 只换文本, 不重读文件。
+    private func renderDetail() {
+        guard let detail else { return }
+        legPicker.setEnabled(detail.hasUpstream, forSegment: 1)
+        if !detail.hasUpstream, legPicker.selectedSegment == 1 {
+            legPicker.selectedSegment = 0
+        }
+        let upstream = legPicker.selectedSegment == 1
+        reqPane.title = upstream ? "Request → 上游" : "Request ← 客户端"
+        resPane.title = upstream ? "Response ← 上游" : "Response → 客户端"
+        reqPane.text = upstream ? detail.upstreamRequest : detail.clientRequest
+        resPane.text = upstream ? detail.upstreamResponse : detail.clientResponse
+    }
+
+    @objc private func legChanged() {
+        renderDetail()
     }
 
     // MARK: - follow

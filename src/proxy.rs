@@ -289,6 +289,8 @@ pub(crate) async fn upstream(
             Provider::Anthropic => anthropic_headers(&cred.access_token, client, stream),
             Provider::Codex => codex_headers(app, &cred, client, stream),
         };
+        // 注入后的 header 与规范化后的 body 只在这里存在 -> 记录也只能在这里取
+        crate::reqlog::note_upstream_request(&method, url, &upstream_headers, &body);
 
         match app
             .http
@@ -299,6 +301,7 @@ pub(crate) async fn upstream(
             .await
         {
             Ok(resp) => {
+                crate::reqlog::note_upstream_response(resp.status(), resp.headers());
                 // 401 = token 失效: 强制续期后重试一次。
                 if resp.status() == StatusCode::UNAUTHORIZED && attempt == 0 {
                     tracing::warn!(provider = %provider, "上游 401, 强制刷新 token 重试");

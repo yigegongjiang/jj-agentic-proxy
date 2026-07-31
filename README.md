@@ -75,7 +75,7 @@ jj-agentic-proxy logout all       # anthropic | codex | all
 
 ## 往返记录
 
-经三端口的每次 req/res 落 `~/.config/jj-agentic-proxy/log/<日期>.jsonl`, 一行一次往返 (JSON Lines, `rg` / `jq` 直接可读):
+经三端口的每次 req/res 落 `~/.config/jj-agentic-proxy/log/<日期>.jsonl`, 一行一次往返 (JSON Lines, `rg` / `jq` 直接可读), **两条腿都记**: 客户端 <-> 代理, 代理 <-> 上游.
 
 <!-- prettier-ignore -->
 | 字段 | 说明 |
@@ -86,11 +86,14 @@ jj-agentic-proxy logout all       # anthropic | codex | all
 | `stream` / `elapsed_ms` | 客户端是否要流式 + 从收到请求到响应结束的耗时 |
 | `req_bytes` / `res_bytes` / `model` | 两侧 body 字节数 + 请求里的 model |
 | `incomplete` | 仅异常时出现: `客户端断开` / `上游流中断: ...` |
-| `req` / `res` | 全文, 排在行尾: JSON body 存 JSON, SSE / 文本存字符串 |
+| `req_headers` / `req` | 客户端发来的 header 与 body 原样 |
+| `res_headers` / `res` | 回给客户端的 header 与 body (SSE 存整段原文) |
+| `upstream` | 上游那一腿: `method` / `url` / `status` / `req_headers` (注入 CLI 身份后的实际值) / `res_headers` (含 `request-id`、限流头) / `req_body` (仅当本层改写过, 未改写即等同 `req`) |
 
-- 摘要字段全在 `req` 之前 -> `cut` / 前缀解析即可拿到摘要, 不必碰大 body
+- 摘要标量全在 `req_headers` 之前 -> 截到该键即得一条摘要, 不必碰 header 与大 body
+- header 原样记录, 含 `authorization`: 本机自用, 抹掉就查不了「上游为什么拒」; 记录文件 0600 (同 `auth.json`)
 - 保留最近 7 天 (按天一个文件, 换天时清理; 启动也清一次), 无体积阈值 -> body 一律全量, 不截断
-- 不记 header: 凭证不落盘; 不记 `/health` (本机探活, 无上游往返)
+- 不记 `/health` (本机探活, 无上游往返); 上游响应体不单独记 (透传面与客户端那份相同)
 - 流式响应逐块 tee 落盘, 不缓冲转发 -> 记录不影响 SSE 首字延迟
 
 ## 查看器 app
@@ -98,6 +101,7 @@ jj-agentic-proxy logout all       # anthropic | codex | all
 `app/` = macOS AppKit app (SwiftPM, 零第三方依赖), 唯一职责是把上面的记录读给人看; 代理能力一概不实现:
 
 - 左列表 (新 -> 旧) + 右上下面板: 选中一条即绑定展示它的 Request / Response
+- 面板按 HTTP 报文排版: 起始行 + header (按名排序) + 空行 + body; `Client ↔ Proxy` / `Proxy ↔ Upstream` 一键切换同一条的两条腿
 - JSON body 缩进展示 (对象键按字典序, 数组保持线上原序), SSE / 文本原样; 每面板可 Copy
 - 顶栏 Follow 自动读入新记录 (选中行不跳走), 日期下拉切换历史, 过滤框按 path / model / status / surface 多词 AND
 - 服务状态与 Start / Stop / Login / Logout 全部转调 CLI (`Console…` 面板实时回显输出), app 不复刻任何判断

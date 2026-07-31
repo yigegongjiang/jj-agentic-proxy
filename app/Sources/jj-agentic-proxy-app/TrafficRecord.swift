@@ -93,9 +93,9 @@ nonisolated enum TrafficParser {
         )
     }
 
-    /// 截到 `,"req":` 之前并补上 `}` -> 一个只含标量字段的小对象。
+    /// 截到 `,"req_headers":` (第一个非摘要字段) 之前并补上 `}` -> 一个只含标量字段的小对象。
     private static func summaryHead(of line: Data) -> Data? {
-        let marker = Data(#","req":"#.utf8)
+        let marker = Data(#","req_headers":"#.utf8)
         // 摘要段固定在行首几百字节内; 限定搜索窗口, 避免在 MB 级 body 里扫。
         let window = line.prefix(4096)
         guard let range = window.range(of: marker) else { return nil }

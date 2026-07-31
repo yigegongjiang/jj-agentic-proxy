@@ -21,6 +21,11 @@ final class BodyPane: NSView {
         set { sizeLabel.stringValue = newValue }
     }
 
+    var title: String {
+        get { titleLabel.stringValue }
+        set { titleLabel.stringValue = newValue }
+    }
+
     init(title: String) {
         super.init(frame: .zero)
 

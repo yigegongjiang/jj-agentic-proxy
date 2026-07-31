@@ -41,10 +41,14 @@ async fn dispatch(
     body: Bytes,
 ) -> Response {
     let path = uri.path_and_query().map_or(uri.path(), |p| p.as_str());
-    let rec = reqlog::start(state.surface, &method, path, &body);
-    let resp = route(state, method, uri, headers, body).await;
+    let rec = reqlog::start(state.surface, &method, path, &headers, &body);
+    // scoped: 处理过程中打上游时顺带把那一腿 (注入后的 header / 改写后的 body) 记下来
+    let (resp, leg) = reqlog::scoped(route(state, method, uri, headers, body)).await;
     match rec {
-        Some(r) => r.capture(resp).await,
+        Some(mut r) => {
+            r.set_upstream(leg);
+            r.capture(resp).await
+        }
         None => resp,
     }
 }

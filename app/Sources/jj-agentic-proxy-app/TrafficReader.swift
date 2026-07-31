@@ -76,15 +76,19 @@ nonisolated enum TrafficReader {
         return batch
     }
 
+    /// 一条往返的两条腿, 每条腿都是完整 HTTP 文本 (起始行 + header + 空行 + body)。
     struct Detail: Sendable {
-        var request = ""
-        var response = ""
+        var clientRequest = ""
+        var clientResponse = ""
+        var upstreamRequest = ""
+        var upstreamResponse = ""
+        var hasUpstream = false
     }
 
     /// 按 (offset, length) 现取整行 -> 只在选中某条时才付出解析大 body 的代价。
     static func detail(day: String, offset: UInt64, length: Int) -> Detail {
         guard let fh = try? FileHandle(forReadingFrom: file(day: day)) else {
-            return Detail(request: "读不到日志文件", response: "")
+            return Detail(clientRequest: "读不到日志文件")
         }
         defer { try? fh.close() }
         try? fh.seek(toOffset: offset)
@@ -92,9 +96,49 @@ nonisolated enum TrafficReader {
               let obj = try? JSONSerialization.jsonObject(with: data),
               let dict = obj as? [String: Any]
         else {
-            return Detail(request: "这一行解析失败 (可能正在写入)", response: "")
+            return Detail(clientRequest: "这一行解析失败 (可能正在写入)")
         }
-        return Detail(request: text(dict["req"]), response: text(dict["res"]))
+
+        let method = dict["method"] as? String ?? "?"
+        let path = dict["path"] as? String ?? "?"
+        var out = Detail(
+            clientRequest: http(start: "\(method) \(path)", headers: dict["req_headers"], body: dict["req"]),
+            clientResponse: http(start: status(dict["status"]), headers: dict["res_headers"], body: dict["res"])
+        )
+
+        guard let up = dict["upstream"] as? [String: Any] else { return out }
+        out.hasUpstream = true
+        let upMethod = up["method"] as? String ?? "?"
+        let upURL = up["url"] as? String ?? "?"
+        // req_body 只在本层改写过时才落盘 -> 缺席即等同客户端请求体
+        let upBody: Any? = up["req_body"] ?? dict["req"]
+        let note = up["req_body"] == nil ? "（请求体未被本层改写, 与客户端一致）\n" : ""
+        out.upstreamRequest = note + http(start: "\(upMethod) \(upURL)", headers: up["req_headers"], body: upBody)
+        out.upstreamResponse = http(
+            start: status(up["status"]),
+            headers: up["res_headers"],
+            body: nil,
+            bodyNote: "（上游响应体不单独记录: 透传面与客户端一致, 转换面见 Client 的 Response）"
+        )
+        return out
+    }
+
+    private static func status(_ code: Any?) -> String {
+        let n = (code as? NSNumber)?.intValue ?? 0
+        return n == 0 ? "HTTP —  (没等到响应)" : "HTTP \(n)"
+    }
+
+    /// 起始行 + header (按名字排序) + 空行 + body -> 就是一段可读的 HTTP 报文。
+    private static func http(start: String, headers: Any?, body: Any?, bodyNote: String = "") -> String {
+        var lines = [start]
+        if let map = headers as? [String: Any] {
+            for key in map.keys.sorted() {
+                lines.append("\(key): \(map[key] ?? "")")
+            }
+        }
+        lines.append("")
+        lines.append(bodyNote.isEmpty ? text(body) : bodyNote)
+        return lines.joined(separator: "\n")
     }
 
     /// JSON body -> 缩进展示 (对象键按字典序, 数组保持原序 = 线上顺序);
