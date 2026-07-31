@@ -2,7 +2,7 @@
 //!
 //! 记两条腿: 客户端 <-> 代理 (header + body 原样), 代理 <-> 上游 (注入后的 header + 被改写的 body)。
 //! 一行一次往返 + 单次 append 写 -> 并发请求不互相穿插, `rg` / `jq` 直接可读。
-//! 只按天保留最近 7 天, 不设体积阈值 (本机自用, 完整记录比省磁盘重要)。
+//! 只按天切文件, 永不删除、不设体积阈值 (本机自用, 完整记录比省磁盘重要; 清理由人类自行决定)。
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read as _, Seek as _, SeekFrom, Write as _};
@@ -23,8 +23,6 @@ use serde_json::{Map, Value};
 use crate::provider::Surface;
 use crate::store::config_dir;
 
-/// 保留天数 (含当天)。
-pub const KEEP_DAYS: i64 = 7;
 /// 时间戳固定 JST: 本机自用, 不引 tz 数据库。
 const TZ_OFFSET_SECS: i64 = 9 * 3600;
 const TZ_SUFFIX: &str = "+09:00";
@@ -304,15 +302,12 @@ struct Writer {
 
 static WRITER: Mutex<Option<Writer>> = Mutex::new(None);
 
-/// 按天切文件: 换天即 reopen + 清理过期。写失败只警告, 绝不影响代理本身。
+/// 按天切文件: 换天即 reopen (旧文件原样留着)。写失败只警告, 绝不影响代理本身。
 fn append(day: &str, line: &str) {
     let mut guard = WRITER.lock().unwrap_or_else(|e| e.into_inner());
     if !matches!(guard.as_ref(), Some(w) if w.day == day) {
         match open(day) {
-            Ok(w) => {
-                *guard = Some(w);
-                purge(day);
-            }
+            Ok(w) => *guard = Some(w),
             Err(e) => {
                 tracing::warn!(error = %e, "打开往返记录失败");
                 return;
@@ -343,30 +338,6 @@ fn open(day: &str) -> io::Result<Writer> {
         day: day.to_string(),
         file,
     })
-}
-
-/// 启动时清一次: 长期空跑也不会留下上个月的文件。
-pub fn sweep() {
-    purge(&parts(now_ms()).0);
-}
-
-/// 文件名即日期 -> ISO 日期字典序 = 时间序, 直接字符串比较。
-fn purge(today: &str) {
-    let Some(cutoff) = shift_days(today, -(KEEP_DAYS - 1)) else {
-        return;
-    };
-    let Ok(entries) = fs::read_dir(log_dir()) else {
-        return;
-    };
-    for e in entries.flatten() {
-        let name = e.file_name().to_string_lossy().into_owned();
-        let Some(day) = name.strip_suffix(EXT) else {
-            continue;
-        };
-        if day.len() == "0000-00-00".len() && day < cutoff.as_str() {
-            let _ = fs::remove_file(e.path());
-        }
-    }
 }
 
 // ---------- 读取 (logs 子命令) ----------
@@ -407,7 +378,7 @@ pub fn print_tail(n: usize) -> Result<()> {
             Err(_) => println!("{raw}"),
         }
     }
-    println!("目录 {} (保留最近 {KEEP_DAYS} 天)", dir.display());
+    println!("目录 {} (按天分文件, 不自动清理)", dir.display());
     Ok(())
 }
 
@@ -520,30 +491,7 @@ fn parts(epoch_ms: i64) -> (String, String) {
     (day, ts)
 }
 
-/// `YYYY-MM-DD` 加减天数; 形状不对返回 `None`。
-fn shift_days(day: &str, delta: i64) -> Option<String> {
-    let mut it = day.split('-');
-    let y: i64 = it.next()?.parse().ok()?;
-    let m: u32 = it.next()?.parse().ok()?;
-    let d: u32 = it.next()?.parse().ok()?;
-    if it.next().is_some() {
-        return None;
-    }
-    let (y, m, d) = civil_from_days(days_from_civil(y, m, d) + delta);
-    Some(format!("{y:04}-{m:02}-{d:02}"))
-}
-
-/// Howard Hinnant 的 civil <-> days 算法 (proleptic Gregorian, 1970-01-01 = 0)。
-fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
-    let y = y - i64::from(m <= 2);
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = (y - era * 400) as u64; // [0, 399]
-    let mp = i64::from(m) + if m > 2 { -3 } else { 9 }; // [0, 11]
-    let doy = ((153 * mp + 2) / 5) as u64 + u64::from(d) - 1; // [0, 365]
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
-    era * 146_097 + doe as i64 - 719_468
-}
-
+/// Howard Hinnant 的 days -> civil 算法 (proleptic Gregorian, 1970-01-01 = 0)。
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
@@ -576,33 +524,18 @@ mod tests {
         assert!(ts.starts_with(&day));
     }
 
+    /// 闰年 / 世纪年 / 负数天 (1970 之前) 都要对。
     #[test]
-    fn civil_days_round_trip() {
-        for (y, m, d) in [
-            (1970, 1, 1),
-            (2000, 2, 29),
-            (2026, 7, 31),
-            (2100, 3, 1),
-            (1969, 12, 31),
+    fn civil_from_days_covers_edges() {
+        for (days, ymd) in [
+            (0, (1970, 1, 1)),
+            (11_016, (2000, 2, 29)),
+            (20_665, (2026, 7, 31)),
+            (47_541, (2100, 3, 1)),
+            (-1, (1969, 12, 31)),
         ] {
-            assert_eq!(civil_from_days(days_from_civil(y, m, d)), (y, m, d));
+            assert_eq!(civil_from_days(days), ymd);
         }
-    }
-
-    #[test]
-    fn retention_cutoff_keeps_seven_days_and_crosses_month() {
-        // 保留含当天共 7 天 -> 截止日 = 今天 - 6
-        assert_eq!(
-            shift_days("2026-07-31", -(KEEP_DAYS - 1)).unwrap(),
-            "2026-07-25"
-        );
-        assert_eq!(shift_days("2026-03-03", -6).unwrap(), "2026-02-25");
-        assert_eq!(shift_days("2026-01-03", -6).unwrap(), "2025-12-28");
-        assert!(shift_days("2026-01", -6).is_none());
-        assert!(shift_days("not-a-day", -6).is_none());
-        // 字典序 = 时间序 (purge 的前提)
-        assert!("2026-07-24" < "2026-07-25");
-        assert!("2025-12-31" < "2026-01-01");
     }
 
     #[test]

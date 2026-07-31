@@ -92,7 +92,7 @@ jj-agentic-proxy logout all       # anthropic | codex | all
 
 - 摘要标量全在 `req_headers` 之前 -> 截到该键即得一条摘要, 不必碰 header 与大 body
 - header 原样记录, 含 `authorization`: 本机自用, 抹掉就查不了「上游为什么拒」; 记录文件 0600 (同 `auth.json`)
-- 保留最近 7 天 (按天一个文件, 换天时清理; 启动也清一次), 无体积阈值 -> body 一律全量, 不截断
+- 按天一个文件, 永不自动清理 (无天数 / 体积上限, 清理由人类自行决定) -> body 一律全量, 不截断
 - 不记 `/health` (本机探活, 无上游往返); 上游响应体不单独记 (透传面与客户端那份相同)
 - 流式响应逐块 tee 落盘, 不缓冲转发 -> 记录不影响 SSE 首字延迟
 
@@ -133,7 +133,7 @@ jj-agentic-proxy logout all       # anthropic | codex | all
 ```
 src/main.rs               CLI (start / stop / login / logout / status / models / logs) + 三个固定端口 + 优雅退出
 src/daemon.rs             后台常驻: 单实例锁 + 探活 + 启停 + 日志封顶
-src/reqlog.rs             往返记录: 一行一次 req/res + 按天分文件 + 7 天清理 + logs 摘要
+src/reqlog.rs             往返记录: 一行一次 req/res + 按天分文件 (不清理) + logs 摘要
 src/server.rs             端口层: Chat Completions + 模型列表 + 往返记录挂点, 其余落透传
 src/proxy.rs              透传: 上游由端口定 + header 注入 + body 规范化 + 带凭证请求上游
 src/convert/mod.rs        Chat Completions 增量模型 + 流式回传 / 非流式聚合

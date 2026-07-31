@@ -82,9 +82,6 @@ async fn serve() -> Result<()> {
     // 独占 pid 锁 -> 第二个实例立刻失败, 且 stop / status 能凭内核锁准确判活。
     let mut instance = daemon::acquire()?;
 
-    // 长期空跑也不留下过期记录 (平时的清理跟随写入发生)。
-    reqlog::sweep();
-
     let http = http_client()?;
     let auth = AuthManager::load(http.clone())?;
 
@@ -211,9 +208,8 @@ fn status() -> Result<()> {
         None => println!("未运行 (`jj-agentic-proxy start` 后台启动)"),
     }
     println!(
-        "往返记录: {} (最近 {} 天)",
-        reqlog::log_dir().display(),
-        reqlog::KEEP_DAYS
+        "往返记录: {} (按天分文件, 不自动清理)",
+        reqlog::log_dir().display()
     );
     let store = store::load()?;
     println!("store: {}", store::auth_path().display());
