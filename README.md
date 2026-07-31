@@ -8,12 +8,13 @@
 
 # jj-agentic-proxy
 
-本机 agentic proxy: 复用自有订阅 (Claude Pro / ChatGPT Plus), 经 Web OAuth 取 token, 以官方 CLI 身份把 Codex 能力暴露在 `127.0.0.1:10010`、Claude Code 能力暴露在 `127.0.0.1:10011` (原生 Anthropic) 与 `127.0.0.1:10012` (Anthropic 官方 OpenAI 兼容层).
+本机 agentic proxy: 复用自有订阅 (Claude Pro / ChatGPT Plus), 经 Web OAuth 取 token, 以官方 CLI 身份把 Codex 能力暴露在 `127.0.0.1:10010`、Claude Code 能力暴露在 `127.0.0.1:10011` (原生 Anthropic) 与 `127.0.0.1:10012` (Anthropic 官方 OpenAI 兼容层); 经手的 req/res 全量落本机文本日志, 配套 macOS app 做绑定查看.
 
 ## 安装
 
 - macOS only; 无预编译分发, 本机构建后装入 `~/.local/bin/jj-agentic-proxy` (见 [workflow.md](./workflow.md))
 - `~/.local/bin` 需在 `PATH`: `export PATH="$HOME/.local/bin:$PATH"`
+- 查看器 app 装入 `/Applications/jj-agentic-proxy-app.app` (同一份 [workflow.md](./workflow.md))
 
 ## 使用
 
@@ -24,6 +25,7 @@ jj-agentic-proxy                  # = start, 后台常驻 (10010 + 10011 + 10012
 jj-agentic-proxy stop             # 停止
 jj-agentic-proxy status           # 运行中/未运行 + 凭证账号 / 套餐 / 到期
 jj-agentic-proxy models           # 两家订阅当前可用 model + 各自端口
+jj-agentic-proxy logs -n 20       # 最近 20 条往返摘要 + 记录目录
 jj-agentic-proxy logout all       # anthropic | codex | all
 ```
 
@@ -71,9 +73,39 @@ jj-agentic-proxy logout all       # anthropic | codex | all
 - 错误一律按方言裹官方信封 (`{"type":"error",...}` / `{"error":{...}}`); 上游已给官方形状则原样透传, 保留 `request-id` 等头
 - 额度查 `10010/backend-api/codex/usage`
 
+## 往返记录
+
+经三端口的每次 req/res 落 `~/.config/jj-agentic-proxy/log/<日期>.jsonl`, 一行一次往返 (JSON Lines, `rg` / `jq` 直接可读):
+
+<!-- prettier-ignore -->
+| 字段 | 说明 |
+| --- | --- |
+| `ts` | 记录时刻, 固定 JST (`+09:00`); 文件名取同一日期 |
+| `surface` / `method` / `path` | 哪个端口 + 客户端请求行 (`path` 含 query) |
+| `status` | 客户端拿到的状态码; `0` = 没等到响应 |
+| `stream` / `elapsed_ms` | 客户端是否要流式 + 从收到请求到响应结束的耗时 |
+| `req_bytes` / `res_bytes` / `model` | 两侧 body 字节数 + 请求里的 model |
+| `incomplete` | 仅异常时出现: `客户端断开` / `上游流中断: ...` |
+| `req` / `res` | 全文, 排在行尾: JSON body 存 JSON, SSE / 文本存字符串 |
+
+- 摘要字段全在 `req` 之前 -> `cut` / 前缀解析即可拿到摘要, 不必碰大 body
+- 保留最近 7 天 (按天一个文件, 换天时清理; 启动也清一次), 无体积阈值 -> body 一律全量, 不截断
+- 不记 header: 凭证不落盘; 不记 `/health` (本机探活, 无上游往返)
+- 流式响应逐块 tee 落盘, 不缓冲转发 -> 记录不影响 SSE 首字延迟
+
+## 查看器 app
+
+`app/` = macOS AppKit app (SwiftPM, 零第三方依赖), 唯一职责是把上面的记录读给人看; 代理能力一概不实现:
+
+- 左列表 (新 -> 旧) + 右上下面板: 选中一条即绑定展示它的 Request / Response
+- JSON body 缩进展示 (对象键按字典序, 数组保持线上原序), SSE / 文本原样; 每面板可 Copy
+- 顶栏 Follow 自动读入新记录 (选中行不跳走), 日期下拉切换历史, 过滤框按 path / model / status / surface 多词 AND
+- 服务状态与 Start / Stop / Login / Logout 全部转调 CLI (`Console…` 面板实时回显输出), app 不复刻任何判断
+- 数据只读: 记录由 CLI 写, app 从不写回
+
 ## 架构
 
-- 单进程 axum, 三端口共用凭证与连接池; 建连超时 20s / 读取空闲超时 300s; 只监听 loopback, 无云端中转, 无请求落盘
+- 单进程 axum, 三端口共用凭证与连接池; 建连超时 20s / 读取空闲超时 300s; 只监听 loopback, 无云端中转; req/res 只落本机日志目录
 - 启动时先 bind 三个端口再对外服务: 端口被占用立刻整体失败, 不留「只有一部分能用」的中间态
 - 单实例: `daemon.pid` 独占文件锁, 锁由内核在进程退出时释放 -> 判活不受 pid 复用 / 残留 pid 文件影响
 - `start` 拉起后台进程后等它写下就绪标记才报成功 (不靠「端口通」, 避免把别人占的端口认成自己); `stop` = SIGTERM -> 等锁释放 -> 5s 未退则 SIGKILL
@@ -95,9 +127,10 @@ jj-agentic-proxy logout all       # anthropic | codex | all
 ## 结构
 
 ```
-src/main.rs               CLI (start / stop / login / logout / status) + 三个固定端口 + 优雅退出
+src/main.rs               CLI (start / stop / login / logout / status / models / logs) + 三个固定端口 + 优雅退出
 src/daemon.rs             后台常驻: 单实例锁 + 探活 + 启停 + 日志封顶
-src/server.rs             端口层: Chat Completions + 模型列表, 其余落透传
+src/reqlog.rs             往返记录: 一行一次 req/res + 按天分文件 + 7 天清理 + logs 摘要
+src/server.rs             端口层: Chat Completions + 模型列表 + 往返记录挂点, 其余落透传
 src/proxy.rs              透传: 上游由端口定 + header 注入 + body 规范化 + 带凭证请求上游
 src/convert/mod.rs        Chat Completions 增量模型 + 流式回传 / 非流式聚合
 src/convert/codex.rs      Chat Completions <-> OpenAI Responses
@@ -108,4 +141,19 @@ src/oauth.rs              PKCE + 本机回调服务 + 两家 token 换取/刷新
 src/provider.rs           协议面 <-> 端口 / 订阅映射 + 两家上游常量 (client_id / endpoint / CLI 冒充参数)
 src/store.rs              auth.json 读写 (原子 + 0600)
 scripts/install-local.sh  本机 release 构建 + 安装 (预部署)
+
+app/Package.swift         查看器 app: SwiftPM executable (macOS 13+, AppKit)
+app/package.sh            Release 构建 + 组装 .app + ad-hoc 签名 + 装 /Applications (版本取自 Cargo.toml)
+app/Resources/            bundle 模板 (Info.plist.in, `@VERSION@` 占位)
+app/Sources/jj-agentic-proxy-app/
+  main.swift              入口 + `--snapshot <png>` 界面自检
+  AppDelegate.swift       主窗口 + 尺寸持久化
+  MainMenu.swift          程序化主菜单
+  MainViewController.swift 列表 + 过滤 + follow + 详情绑定
+  BodyPane.swift          单个 body 面板 (等宽只读 + Copy)
+  TrafficRecord.swift     一行记录的摘要模型 + 行首摘要解析
+  TrafficReader.swift     日期枚举 + 增量索引 + 按 (offset, length) 现取全文
+  ConsoleWindowController.swift  CLI 控制台面板
+  CommandRunner.swift     跑 CLI 子命令 + 输出实时回吐
+  ProxyPaths.swift        CLI / 日志目录定位
 ```

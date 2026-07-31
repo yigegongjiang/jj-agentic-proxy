@@ -1,2 +1,7 @@
 /target
 /local
+.DS_Store
+/app/.build
+/app/build
+/app/.swiftpm
+/app/Package.resolved

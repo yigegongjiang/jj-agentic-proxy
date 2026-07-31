@@ -6,6 +6,7 @@ mod daemon;
 mod oauth;
 mod provider;
 mod proxy;
+mod reqlog;
 mod server;
 mod sse;
 mod store;
@@ -52,6 +53,12 @@ enum Cmd {
     Status,
     /// 列出两家订阅当前可用的 model
     Models,
+    /// 打印最近的 req/res 往返记录摘要
+    Logs {
+        /// 条数
+        #[arg(short = 'n', long, default_value_t = 20)]
+        count: usize,
+    },
 }
 
 #[tokio::main]
@@ -65,6 +72,7 @@ async fn main() -> Result<()> {
         Cmd::Logout { provider } => logout(&provider),
         Cmd::Status => status(),
         Cmd::Models => models().await,
+        Cmd::Logs { count } => reqlog::print_tail(count),
     }
 }
 
@@ -73,6 +81,9 @@ async fn serve() -> Result<()> {
     init_tracing()?;
     // 独占 pid 锁 -> 第二个实例立刻失败, 且 stop / status 能凭内核锁准确判活。
     let mut instance = daemon::acquire()?;
+
+    // 长期空跑也不留下过期记录 (平时的清理跟随写入发生)。
+    reqlog::sweep();
 
     let http = http_client()?;
     let auth = AuthManager::load(http.clone())?;
@@ -199,6 +210,11 @@ fn status() -> Result<()> {
         }
         None => println!("未运行 (`jj-agentic-proxy start` 后台启动)"),
     }
+    println!(
+        "往返记录: {} (最近 {} 天)",
+        reqlog::log_dir().display(),
+        reqlog::KEEP_DAYS
+    );
     let store = store::load()?;
     println!("store: {}", store::auth_path().display());
     for p in Provider::ALL {

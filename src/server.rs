@@ -21,6 +21,7 @@ use serde_json::{json, Value};
 use crate::convert;
 use crate::provider::{self, Provider, Surface};
 use crate::proxy::{self, json_body, App, Dialect, Port};
+use crate::reqlog;
 use crate::store::now;
 
 pub fn router(port: Port) -> Router {
@@ -31,7 +32,24 @@ pub fn router(port: Port) -> Router {
         .with_state(port)
 }
 
+/// 唯一入口 -> 往返记录只需挂在这里, 所有端口 / 路径 / 错误一并覆盖。
 async fn dispatch(
+    state: State<Port>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let path = uri.path_and_query().map_or(uri.path(), |p| p.as_str());
+    let rec = reqlog::start(state.surface, &method, path, &body);
+    let resp = route(state, method, uri, headers, body).await;
+    match rec {
+        Some(r) => r.capture(resp).await,
+        None => resp,
+    }
+}
+
+async fn route(
     state: State<Port>,
     method: Method,
     uri: Uri,

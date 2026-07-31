@@ -11,7 +11,16 @@
 
 - `gh`: 已登录
 - `cargo`: 本机 toolchain; 未登录 crates.io -> 不发布 crate
-- `scripts/install-local.sh`: 本机构建 + 装入 `~/.local/bin` (预部署用)
+- `swift`: 本机 Swift 6.2+ / Xcode 26+ (查看器 app 用 `defaultIsolation`)
+- `scripts/install-local.sh`: CLI 本机构建 + 装入 `~/.local/bin` (预部署用)
+- `app/package.sh`: app 本机构建 + 装入 `/Applications` (预部署用)
+
+# 调试
+
+- CLI 往返记录: `jj-agentic-proxy logs -n 20` 看摘要; 原始行 `jq` 直接读 `~/.config/jj-agentic-proxy/log/<日期>.jsonl`
+- app 快编: `cd app && swift build` -> `./.build/debug/jj-agentic-proxy-app`
+- app 界面自检 (不需录屏授权): `./.build/debug/jj-agentic-proxy-app --snapshot /tmp/app.png` -> 离屏渲染主窗口, 直接看 PNG
+- 改完代理行为后先 `./scripts/install-local.sh` + `jj-agentic-proxy start` 再打真实请求验证 (start 自带 restart)
 
 # 发布
 
@@ -21,9 +30,9 @@
 
 依序执行：
 
-1. 验证：`cargo fmt --check` + `cargo clippy --all-targets -- -D warnings` + `cargo test` + `cargo build --release`
+1. 验证：`cargo fmt --check` + `cargo clippy --all-targets -- -D warnings` + `cargo test` + `cargo build --release` + `swift build -c release`
 2. 写版本：`Cargo.toml` + `Cargo.lock` + `CHANGELOG.md` 同步 (与 tag 一致)
-3. 预部署：`./scripts/install-local.sh` (装入 `~/.local/bin`)
+3. 预部署：`./scripts/install-local.sh` + `./app/package.sh`
 4. 发布：commit + annotated tag (`-a -m`) + push branch + tag
 
 ## 1. 验证
@@ -33,6 +42,7 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
 cargo build --release
+( cd app && swift build -c release )   # app 编译通过 = 交付闸
 ```
 
 ## 2. 写版本
@@ -42,18 +52,21 @@ cargo build --release
   - `Cargo.toml` -> `[package] version`
   - `Cargo.lock` -> 改完 `Cargo.toml` 跑 `cargo build` 自动同步, 一并提交
   - `CHANGELOG.md` (Unreleased 段落转为正式版本条目)
+- app 版本无需单独维护: `app/package.sh` 从 `Cargo.toml` 读取并注入 `Info.plist`
 
 ## 3. 预部署
 
-本机构建 + 安装二进制到 `~/.local/bin`, 末尾自动跑 `--version` 自检:
+CLI 装 `~/.local/bin` (末尾自动跑 `--version` 自检), app 装 `/Applications`:
 
 ```bash
 ./scripts/install-local.sh
+./app/package.sh
 ```
 
-- 内容: `cargo build --release` -> 临时文件 -> `mv` 原子替换 `~/.local/bin/jj-agentic-proxy`
+- CLI: `cargo build --release` -> 临时文件 -> `mv` 原子替换 `~/.local/bin/jj-agentic-proxy`
 - 只覆盖同名二进制, 不影响目录内其他 `jj-*` CLI
-- 验证: 脚本输出的 `--version` 与本次 tag 一致
+- app: Release 构建 -> 组装 bundle -> ad-hoc 签名 (DR 钉 identifier-only) -> `pkill` 旧实例 -> `ditto` 到 `/Applications`
+- 验证: 脚本输出的版本与本次 tag 一致 (两个脚本都会回显)
 
 > MUST NOT 改回 `cp` 原地覆盖: macOS 会因代码签名缓存失效直接 `Killed: 9`。
 > 旧进程仍在跑时: 装完执行 `jj-agentic-proxy start` 即切到新版本 (start 自带 restart)。
