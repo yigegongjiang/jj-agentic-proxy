@@ -76,19 +76,28 @@ nonisolated enum TrafficReader {
         return batch
     }
 
-    /// 一条往返的两条腿, 每条腿都是完整 HTTP 文本 (起始行 + header + 空行 + body)。
+    /// 一条腿的两种读法: 原始报文 (起始行 + header + 空行 + body) 与核心内容 (语义摘出来的纯文本)。
+    /// 两份都在后台一次算好 -> 界面切视图不重读文件、不重新解析。
+    struct Leg: Sendable {
+        var raw = ""
+        var core = ""
+
+        func text(core wantCore: Bool) -> String { wantCore ? core : raw }
+    }
+
+    /// 一条往返的两条腿。
     struct Detail: Sendable {
-        var clientRequest = ""
-        var clientResponse = ""
-        var upstreamRequest = ""
-        var upstreamResponse = ""
+        var clientRequest = Leg()
+        var clientResponse = Leg()
+        var upstreamRequest = Leg()
+        var upstreamResponse = Leg()
         var hasUpstream = false
     }
 
     /// 按 (offset, length) 现取整行 -> 只在选中某条时才付出解析大 body 的代价。
     static func detail(day: String, offset: UInt64, length: Int) -> Detail {
         guard let fh = try? FileHandle(forReadingFrom: file(day: day)) else {
-            return Detail(clientRequest: "读不到日志文件")
+            return Detail(clientRequest: both("读不到日志文件"))
         }
         defer { try? fh.close() }
         try? fh.seek(toOffset: offset)
@@ -96,14 +105,20 @@ nonisolated enum TrafficReader {
               let obj = try? JSONSerialization.jsonObject(with: data),
               let dict = obj as? [String: Any]
         else {
-            return Detail(clientRequest: "这一行解析失败 (可能正在写入)")
+            return Detail(clientRequest: both("这一行解析失败 (可能正在写入)"))
         }
 
         let method = dict["method"] as? String ?? "?"
         let path = dict["path"] as? String ?? "?"
         var out = Detail(
-            clientRequest: http(start: "\(method) \(path)", headers: dict["req_headers"], body: dict["req"]),
-            clientResponse: http(start: status(dict["status"]), headers: dict["res_headers"], body: dict["res"])
+            clientRequest: Leg(
+                raw: http(start: "\(method) \(path)", headers: dict["req_headers"], body: dict["req"]),
+                core: CoreContent.request(path: path, body: dict["req"])
+            ),
+            clientResponse: Leg(
+                raw: http(start: status(dict["status"]), headers: dict["res_headers"], body: dict["res"]),
+                core: CoreContent.response(path: path, body: dict["res"])
+            )
         )
 
         guard let up = dict["upstream"] as? [String: Any] else { return out }
@@ -113,15 +128,21 @@ nonisolated enum TrafficReader {
         // req_body 只在本层改写过时才落盘 -> 缺席即等同客户端请求体
         let upBody: Any? = up["req_body"] ?? dict["req"]
         let note = up["req_body"] == nil ? "（请求体未被本层改写, 与客户端一致）\n" : ""
-        out.upstreamRequest = note + http(start: "\(upMethod) \(upURL)", headers: up["req_headers"], body: upBody)
-        out.upstreamResponse = http(
+        out.upstreamRequest = Leg(
+            raw: note + http(start: "\(upMethod) \(upURL)", headers: up["req_headers"], body: upBody),
+            core: note + CoreContent.request(path: upURL, body: upBody)
+        )
+        out.upstreamResponse = both(http(
             start: status(up["status"]),
             headers: up["res_headers"],
             body: nil,
             bodyNote: "（上游响应体不单独记录: 透传面与客户端一致, 转换面见 Client 的 Response）"
-        )
+        ))
         return out
     }
+
+    /// 没有第二种读法的腿 (纯提示 / 只有 header): 两个视图给同一份。
+    private static func both(_ text: String) -> Leg { Leg(raw: text, core: text) }
 
     private static func status(_ code: Any?) -> String {
         let n = (code as? NSNumber)?.intValue ?? 0

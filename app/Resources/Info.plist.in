@@ -13,9 +13,9 @@
         <string>en</string>
     </array>
     <key>CFBundleExecutable</key>
-    <string>jj-agentic-proxy-app</string>
+    <string>jj-agentic-proxy</string>
     <key>CFBundleIdentifier</key>
-    <string>com.yigegongjiang.jj-agentic-proxy-app</string>
+    <string>com.yigegongjiang.jj-agentic-proxy</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundlePackageType</key>

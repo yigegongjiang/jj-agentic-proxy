@@ -50,6 +50,8 @@ nonisolated enum MainMenu {
                          action: #selector(MainViewController.focusSearch(_:)), keyEquivalent: "f")
         viewMenu.addItem(withTitle: "Toggle Follow",
                          action: #selector(MainViewController.toggleFollow(_:)), keyEquivalent: "t")
+        viewMenu.addItem(withTitle: "Toggle Core / Raw",
+                         action: #selector(MainViewController.toggleCoreView(_:)), keyEquivalent: "d")
         viewMenu.addItem(.separator())
         viewMenu.addItem(withTitle: "CLI Console",
                          action: #selector(MainViewController.openConsole(_:)), keyEquivalent: "l")

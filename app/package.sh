@@ -5,7 +5,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-APP_NAME="jj-agentic-proxy-app"
+APP_NAME="jj-agentic-proxy"
 VERSION="$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$ROOT/../Cargo.toml" | head -1)"
 [ -n "$VERSION" ] || { echo "读不到 Cargo.toml 版本号" >&2; exit 1; }
 

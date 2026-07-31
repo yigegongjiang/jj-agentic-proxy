@@ -18,8 +18,8 @@
 # 调试
 
 - CLI 往返记录: `jj-agentic-proxy logs -n 20` 看摘要; 原始行 `jq` 直接读 `~/.config/jj-agentic-proxy/log/<日期>.jsonl`
-- app 快编: `cd app && swift build` -> `./.build/debug/jj-agentic-proxy-app`
-- app 界面自检 (不需录屏授权): `./.build/debug/jj-agentic-proxy-app --snapshot /tmp/app.png` -> 离屏渲染主窗口, 直接看 PNG
+- app 快编: `cd app && swift build` -> `./.build/debug/jj-agentic-proxy`
+- app 界面自检 (不需录屏授权): `./.build/debug/jj-agentic-proxy --snapshot /tmp/app.png` -> 离屏渲染主窗口, 直接看 PNG
 - 改完代理行为后先 `./scripts/install-local.sh` + `jj-agentic-proxy start` 再打真实请求验证 (start 自带 restart)
 
 # 发布

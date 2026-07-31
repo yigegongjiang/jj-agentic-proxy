@@ -14,7 +14,7 @@
 
 - macOS only; 无预编译分发, 本机构建后装入 `~/.local/bin/jj-agentic-proxy` (见 [workflow.md](./workflow.md))
 - `~/.local/bin` 需在 `PATH`: `export PATH="$HOME/.local/bin:$PATH"`
-- 查看器 app 装入 `/Applications/jj-agentic-proxy-app.app` (同一份 [workflow.md](./workflow.md))
+- 查看器 app 装入 `/Applications/jj-agentic-proxy.app` (同一份 [workflow.md](./workflow.md))
 
 ## 使用
 
@@ -101,11 +101,25 @@ jj-agentic-proxy logout all       # anthropic | codex | all
 `app/` = macOS AppKit app (SwiftPM, 零第三方依赖), 唯一职责是把上面的记录读给人看; 代理能力一概不实现:
 
 - 左列表 (新 -> 旧) + 右上下面板: 选中一条即绑定展示它的 Request / Response
-- 面板按 HTTP 报文排版: 起始行 + header (按名排序) + 空行 + body; `Client ↔ Proxy` / `Proxy ↔ Upstream` 一键切换同一条的两条腿
-- JSON body 缩进展示 (对象键按字典序, 数组保持线上原序), SSE / 文本原样; 每面板可 Copy
+- 两组切换互不干扰: `Client ↔ Proxy` / `Proxy ↔ Upstream` 选哪条腿, `核心内容` / `原始报文` 选哪种读法 (⌘D)
+- 核心内容 (默认): 见下「核心内容视图」
+- 原始报文: 起始行 + header (按名排序) + 空行 + body; JSON 缩进展示 (对象键按字典序, 数组保持线上原序), SSE / 文本原样
+- 每面板可 Copy (复制当前视图的文本)
 - 顶栏 Follow 自动读入新记录 (选中行不跳走), 日期下拉切换历史, 过滤框按 path / model / status / surface 多词 AND
 - 服务状态与 Start / Stop / Login / Logout 全部转调 CLI (`Console…` 面板实时回显输出), app 不复刻任何判断
 - 数据只读: 记录由 CLI 写, app 从不写回
+
+### 核心内容视图
+
+SSE 原文是几百帧被切碎的 `event:` / `data:`, 人读不了 -> 先重建成完整消息再排纯文本. 请求侧同理: 从嵌套 JSON 里抽出对话轮次.
+
+- 请求: `model` / `stream` / token 上限 / 采样参数一行, `tools` 名字一行; 之后 system (或 `instructions`) + 逐轮消息, 轮内的工具调用与结果缩进挂在该轮下
+- 响应: 方言 + 帧数 + 是否收到收尾事件一行, `model` / `id` / `stop` 一行, usage 一行 (只留非 0 计数), 帧种类计数一行; 之后按产出顺序排 text / thinking / tool_call 段
+- 工具参数逐帧拼回完整 JSON 再缩进展示; 流被截断没拼全就原样给
+- 认三种方言 (与三个协议面一致): Anthropic Messages / OpenAI Chat Completions / OpenAI Responses; 流式与非流式同一套渲染
+- 认不出方言: 每帧压成一行列出; 非对话请求 (`/v1/models`、`count_tokens`) 回退成原 JSON -> 永远给得出东西
+- 「空」与「拿不到」分开说: 上游只回签名不回思考正文时标注加密, 不显示成空内容
+- 单段超 128KB / 全文超 4MB 截断展示, 提示切「原始报文」看全文 (日志文件里一律全量)
 
 ## 架构
 
@@ -149,14 +163,15 @@ scripts/install-local.sh  本机 release 构建 + 安装 (预部署)
 app/Package.swift         查看器 app: SwiftPM executable (macOS 13+, AppKit)
 app/package.sh            Release 构建 + 组装 .app + ad-hoc 签名 + 装 /Applications (版本取自 Cargo.toml)
 app/Resources/            bundle 模板 (Info.plist.in, `@VERSION@` 占位)
-app/Sources/jj-agentic-proxy-app/
+app/Sources/jj-agentic-proxy/
   main.swift              入口 + `--snapshot <png>` 界面自检
   AppDelegate.swift       主窗口 + 尺寸持久化
   MainMenu.swift          程序化主菜单
   MainViewController.swift 列表 + 过滤 + follow + 详情绑定
   BodyPane.swift          单个 body 面板 (等宽只读 + Copy)
+  CoreContent.swift       核心内容视图: SSE 重建 + 三方言归一 + 纯文本排版
   TrafficRecord.swift     一行记录的摘要模型 + 行首摘要解析
-  TrafficReader.swift     日期枚举 + 增量索引 + 按 (offset, length) 现取全文
+  TrafficReader.swift     日期枚举 + 增量索引 + 按 (offset, length) 现取全文 (原始报文 + 核心内容各一份)
   ConsoleWindowController.swift  CLI 控制台面板
   CommandRunner.swift     跑 CLI 子命令 + 输出实时回吐
   ProxyPaths.swift        CLI / 日志目录定位

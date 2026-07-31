@@ -5,12 +5,12 @@ import PackageDescription
 // defaultIsolation(MainActor): AppKit 全程主线程; 日志扫描与子进程输出显式 hop 到后台队列。
 // 零第三方依赖: 只用系统 AppKit / Foundation。
 let package = Package(
-    name: "jj-agentic-proxy-app",
+    name: "jj-agentic-proxy",
     platforms: [.macOS(.v13)],
     targets: [
         .executableTarget(
-            name: "jj-agentic-proxy-app",
-            path: "Sources/jj-agentic-proxy-app",
+            name: "jj-agentic-proxy",
+            path: "Sources/jj-agentic-proxy",
             swiftSettings: [
                 .defaultIsolation(MainActor.self)
             ]

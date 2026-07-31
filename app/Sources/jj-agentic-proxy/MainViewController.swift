@@ -33,6 +33,8 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
     private let metaLabel = NSTextField(labelWithString: "")
     private let legPicker = NSSegmentedControl(labels: ["Client ↔ Proxy", "Proxy ↔ Upstream"],
                                                trackingMode: .selectOne, target: nil, action: nil)
+    private let viewPicker = NSSegmentedControl(labels: ["核心内容", "原始报文"],
+                                                trackingMode: .selectOne, target: nil, action: nil)
     private let reqPane = BodyPane(title: "Request")
     private let resPane = BodyPane(title: "Response")
     private let mainSplit = NSSplitView()
@@ -177,6 +179,15 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         legPicker.action = #selector(legChanged)
         legPicker.translatesAutoresizingMaskIntoConstraints = false
 
+        // 默认核心内容: SSE 原文几百帧不可读, 想核对逐帧细节再切「原始报文」
+        viewPicker.selectedSegment = 0
+        viewPicker.segmentStyle = .rounded
+        viewPicker.font = .systemFont(ofSize: 11)
+        viewPicker.target = self
+        viewPicker.action = #selector(legChanged)
+        viewPicker.toolTip = "核心内容 = 对话轮次 / 模型产出 / 工具调用; 原始报文 = 起始行 + header + body 原文"
+        viewPicker.translatesAutoresizingMaskIntoConstraints = false
+
         detailSplit.isVertical = false // 上下: Request / Response
         detailSplit.dividerStyle = .thin
         detailSplit.delegate = self
@@ -187,6 +198,7 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         let detail = NSView()
         detail.addSubview(metaLabel)
         detail.addSubview(legPicker)
+        detail.addSubview(viewPicker)
         detail.addSubview(detailSplit)
         NSLayoutConstraint.activate([
             metaLabel.topAnchor.constraint(equalTo: detail.topAnchor, constant: 4),
@@ -194,6 +206,9 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
             metaLabel.trailingAnchor.constraint(equalTo: detail.trailingAnchor, constant: -10),
             legPicker.topAnchor.constraint(equalTo: metaLabel.bottomAnchor, constant: 6),
             legPicker.leadingAnchor.constraint(equalTo: detail.leadingAnchor, constant: 10),
+            viewPicker.centerYAnchor.constraint(equalTo: legPicker.centerYAnchor),
+            viewPicker.leadingAnchor.constraint(greaterThanOrEqualTo: legPicker.trailingAnchor, constant: 10),
+            viewPicker.trailingAnchor.constraint(equalTo: detail.trailingAnchor, constant: -10),
             detailSplit.topAnchor.constraint(equalTo: legPicker.bottomAnchor, constant: 6),
             detailSplit.leadingAnchor.constraint(equalTo: detail.leadingAnchor),
             detailSplit.trailingAnchor.constraint(equalTo: detail.trailingAnchor),
@@ -439,7 +454,7 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         }
     }
 
-    /// 两条腿共用同一对面板: 只换文本, 不重读文件。
+    /// 两条腿 × 两种读法共用同一对面板: 只换文本, 不重读文件也不重新解析。
     private func renderDetail() {
         guard let detail else { return }
         legPicker.setEnabled(detail.hasUpstream, forSegment: 1)
@@ -447,13 +462,19 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
             legPicker.selectedSegment = 0
         }
         let upstream = legPicker.selectedSegment == 1
+        let core = viewPicker.selectedSegment == 0
         reqPane.title = upstream ? "Request → 上游" : "Request ← 客户端"
         resPane.title = upstream ? "Response ← 上游" : "Response → 客户端"
-        reqPane.text = upstream ? detail.upstreamRequest : detail.clientRequest
-        resPane.text = upstream ? detail.upstreamResponse : detail.clientResponse
+        reqPane.text = (upstream ? detail.upstreamRequest : detail.clientRequest).text(core: core)
+        resPane.text = (upstream ? detail.upstreamResponse : detail.clientResponse).text(core: core)
     }
 
     @objc private func legChanged() {
+        renderDetail()
+    }
+
+    @objc func toggleCoreView(_ sender: Any?) {
+        viewPicker.selectedSegment = viewPicker.selectedSegment == 0 ? 1 : 0
         renderDetail()
     }
 
