@@ -14,6 +14,12 @@
 
 ## [Unreleased]
 
+## [0.5.5] - 2026-07-31
+
+### Removed
+
+- 取消一键安装脚本与预编译二进制下载: 改为自行构建安装, 历史版本的下载页也已下线
+
 ## [0.5.4] - 2026-07-31
 
 ### Changed
@@ -174,7 +180,8 @@
 - 凭证到期前自动续期, 上游拒绝时自动重试一次, 无需手工介入
 - 流式回答逐块透传, 首字延迟与官方 CLI 一致
 
-[Unreleased]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.4.5...HEAD
+[Unreleased]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.5.5...HEAD
+[0.5.5]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.5.4...v0.5.5
 [0.4.5]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/yigegongjiang/jj-agentic-proxy/compare/v0.4.2...v0.4.3

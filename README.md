@@ -12,12 +12,8 @@
 
 ## 安装
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/yigegongjiang/jj-agentic-proxy/master/scripts/install.sh | bash
-```
-
-- macOS only (arm64 / x64); 取 GitHub Releases 最新版, 校验 SHA256, 落 `~/.local/bin/jj-agentic-proxy`
-- `~/.local/bin` 不在 `PATH` 时脚本会提示补 `export PATH="$HOME/.local/bin:$PATH"`
+- macOS only; 无预编译分发, 本机构建后装入 `~/.local/bin/jj-agentic-proxy` (见 [workflow.md](./workflow.md))
+- `~/.local/bin` 需在 `PATH`: `export PATH="$HOME/.local/bin:$PATH"`
 
 ## 使用
 
@@ -111,7 +107,5 @@ src/auth.rs               凭证内存态 + 到期预判 + 单飞刷新
 src/oauth.rs              PKCE + 本机回调服务 + 两家 token 换取/刷新
 src/provider.rs           协议面 <-> 端口 / 订阅映射 + 两家上游常量 (client_id / endpoint / CLI 冒充参数)
 src/store.rs              auth.json 读写 (原子 + 0600)
-scripts/install.sh        使用者一键安装 (GitHub Releases -> ~/.local/bin)
 scripts/install-local.sh  本机 release 构建 + 安装 (预部署)
-.github/workflows/release.yml  tag 触发: 双架构构建 + checksums + GitHub Release
 ```

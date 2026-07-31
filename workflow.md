@@ -4,7 +4,7 @@
 - 所有段落均为条件段, 根据工程实际决定保留或删除; 存在即为明确流程, MUST NOT 附加强度标记
 - 发布内按顺序编号步骤; 顶部 TL;DR ≤ 5 行; 删除子段后重编号保持连续
 - 风险点 / 不可逆操作用 `>` 引用块; 高危操作 MUST 标禁用条件
-- GHA 结果不监听: MUST NOT 写 `gh run watch` / `gh run list` / `gh release view` 等等待·轮询·验证 CI 的步骤
+- 无 CI / 无二进制分发: MUST NOT 写 GitHub Actions / Releases 相关步骤
 ```
 
 # 可用工具
@@ -12,7 +12,6 @@
 - `gh`: 已登录
 - `cargo`: 本机 toolchain; 未登录 crates.io -> 不发布 crate
 - `scripts/install-local.sh`: 本机构建 + 装入 `~/.local/bin` (预部署用)
-- `scripts/install.sh`: 面向使用者, 从 GitHub Releases 下载二进制 (AI 不执行)
 
 # 发布
 
@@ -69,7 +68,7 @@ git push origin master
 git push origin vX.Y.Z
 ```
 
-push tag 即交付完成。tag 自动触发 `.github/workflows/release.yml` (校验 tag == `Cargo.toml` version -> 双架构 darwin 构建 -> `checksums.txt` -> GitHub Release), 结果不监听不等待。
+push tag 即交付完成。tag 只做版本标记, 无 CI 触发, 无产物上传。
 
-> tag 与 `Cargo.toml` version 不一致会让 GHA 失败: 修版本 -> 删 tag (`git tag -d` + `git push origin :vX.Y.Z`) -> 重打重推。
-> 版本已被使用者装走后 MUST NOT 重推同名 tag。
+> tag 与 `Cargo.toml` version 不一致: 修版本 -> 删 tag (`git tag -d` + `git push origin :vX.Y.Z`) -> 重打重推。
+> tag 已推送后 MUST NOT 重推同名 tag。
