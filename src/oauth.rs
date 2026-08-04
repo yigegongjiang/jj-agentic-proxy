@@ -42,6 +42,21 @@ pub fn random_b64(len: usize) -> String {
 
 /// 走完一次交互式登录, 返回可落盘的凭证。
 pub async fn login(http: &reqwest::Client, p: Provider) -> Result<Credential> {
+    login_reporting(http, p, |url| {
+        println!("在浏览器中完成授权 (等待回调, 最多 5 分钟):\n{url}\n");
+    })
+    .await
+}
+
+/// 同上, 但把 authorize URL 交给调用方 (web 查看器要显示在页面上, 而非打印到 stdout)。
+///
+/// 回调端口写死在上游 allow-list -> 浏览器必须开在本机, 与「谁发起了登录」无关:
+/// 从别的机器点登录, 授权码也只会回到本机的回调端口。
+pub async fn login_reporting(
+    http: &reqwest::Client,
+    p: Provider,
+    on_url: impl FnOnce(&str) + Send,
+) -> Result<Credential> {
     let pkce = pkce();
     let state = random_b64(32);
     let (auth_url, port, path) = match p {
@@ -57,8 +72,9 @@ pub async fn login(http: &reqwest::Client, p: Provider) -> Result<Credential> {
         ),
     };
 
+    // 先占回调端口再交出 URL: 端口被别的进程占着就别让人白跑一趟授权。
     let listeners = bind_callback(port)?;
-    println!("在浏览器中完成授权 (等待回调, 最多 5 分钟):\n{auth_url}\n");
+    on_url(&auth_url);
     let _ = webbrowser::open(&auth_url);
 
     let expect_path = path.to_string();

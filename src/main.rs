@@ -10,6 +10,7 @@ mod reqlog;
 mod server;
 mod sse;
 mod store;
+mod webui;
 
 use std::future::IntoFuture as _;
 use std::sync::Arc;
@@ -103,24 +104,23 @@ async fn serve() -> Result<()> {
     });
 
     // 先全部 bind 再 serve: 端口被占用要立刻失败, 不留半个可用端口的中间态。
+    // 查看器端口与协议面同等对待 -> 不会出现「代理在跑但看不见流量」的半残状态。
     let mut bound = Vec::new();
     for s in Surface::ALL {
         bound.push((s, bind(s.port()).await?));
     }
+    let ui_bound = bind(provider::UI_PORT).await?;
 
-    let mut tasks = Vec::new();
+    let mut tasks: Vec<(&'static str, tokio::task::JoinHandle<_>)> = Vec::new();
     for (s, listeners) in bound {
         for listener in listeners {
-            match listener.local_addr() {
-                Ok(addr) => tracing::info!("{s:<13} listening on http://{addr}"),
-                Err(e) => tracing::warn!("{s:<13} 取监听地址失败: {e}"),
-            }
+            log_listen(s.key(), &listener);
             let port = proxy::Port {
                 app: app.clone(),
                 surface: s,
             };
             tasks.push((
-                s,
+                s.key(),
                 tokio::spawn(
                     axum::serve(listener, server::router(port))
                         .with_graceful_shutdown(shutdown())
@@ -129,15 +129,36 @@ async fn serve() -> Result<()> {
             ));
         }
     }
+    for listener in ui_bound {
+        log_listen(UI_LABEL, &listener);
+        tasks.push((
+            UI_LABEL,
+            tokio::spawn(
+                axum::serve(listener, webui::router(app.clone()))
+                    .with_graceful_shutdown(shutdown())
+                    .into_future(),
+            ),
+        ));
+    }
 
     daemon::mark_ready(&mut instance)?;
 
-    for (s, task) in tasks {
+    for (label, task) in tasks {
         task.await
-            .with_context(|| format!("{s} 端口任务异常"))?
-            .with_context(|| format!("{s} 端口服务异常退出"))?;
+            .with_context(|| format!("{label} 端口任务异常"))?
+            .with_context(|| format!("{label} 端口服务异常退出"))?;
     }
     Ok(())
+}
+
+/// 查看器不是协议面 -> 没有 `Surface` 可借, 单独一个标签。
+const UI_LABEL: &str = "web-ui";
+
+fn log_listen(label: &str, listener: &tokio::net::TcpListener) {
+    match listener.local_addr() {
+        Ok(addr) => tracing::info!("{label:<13} listening on http://{addr}"),
+        Err(e) => tracing::warn!("{label:<13} 取监听地址失败: {e}"),
+    }
 }
 
 /// 前台 -> stderr; 后台 (由 `start` 注入日志路径) -> 封顶日志文件, 无 ANSI。
@@ -183,18 +204,24 @@ async fn bind(port: u16) -> Result<Vec<tokio::net::TcpListener>> {
 }
 
 /// 本机在局域网里的地址: UDP connect 只查路由不发包, 无网络往返也能拿到出口网卡 IP。
-fn lan_ip() -> Option<std::net::IpAddr> {
+pub(crate) fn lan_ip() -> Option<std::net::IpAddr> {
     let sock = std::net::UdpSocket::bind(("0.0.0.0", 0)).ok()?;
     sock.connect(("8.8.8.8", 80)).ok()?;
     let ip = sock.local_addr().ok()?.ip();
     (!ip.is_loopback() && !ip.is_unspecified()).then_some(ip)
 }
 
-/// 三个端口的 base url + 局域网入口 (start / status 共用)。
+/// 三个协议面 + 查看器的 base url, 附局域网入口 (start / status 共用)。
 pub(crate) fn print_endpoints() {
+    // 用 key() 而非 Display: 宽度说明符对自定义 Display 不生效, 会排不齐。
     for s in Surface::ALL {
-        println!("- {s:<13} http://{}:{}", provider::HOST, s.port());
+        println!("- {:<13} http://{}:{}", s.key(), provider::HOST, s.port());
     }
+    println!(
+        "- {UI_LABEL:<13} http://{}:{} (浏览器打开看往返记录)",
+        provider::HOST,
+        provider::UI_PORT
+    );
     if let Some(ip) = lan_ip() {
         println!("  局域网同端口: http://{ip} (无鉴权, 仅限可信内网)");
     }
@@ -305,7 +332,7 @@ async fn models() -> Result<()> {
 /// 自然序: 数字段按数值比, 其余按字节。
 ///
 /// 纯字典序会把 `claude-opus-4-10` 排在 `4-8` 前面; 按数值比才能让同族版本顺次排列。
-fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+pub(crate) fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     let (mut x, mut y) = (a.as_bytes(), b.as_bytes());
     loop {

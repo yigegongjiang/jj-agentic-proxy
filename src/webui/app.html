@@ -1,0 +1,1541 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>jj-agentic-proxy</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='4' fill='%232d7ff9'/%3E%3Cpath d='M4 11.5V4.5h1.6v5.6h2.2v1.4zm5.2 0V4.5h1.6v7z' fill='white'/%3E%3C/svg%3E">
+<style>
+:root {
+  --bg: #ffffff; --bg-alt: #f6f6f7; --bg-row: #fafafa; --panel: #fdfdfd;
+  --fg: #1d1d1f; --fg-dim: #6e6e73; --fg-faint: #9a9aa0;
+  --line: #e0e0e3; --accent: #2d7ff9; --sel: #d6e6ff;
+  --green: #1a8a4a; --teal: #0f7f8f; --orange: #c4650a; --red: #cc2f2f;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  --ui: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1c1c1e; --bg-alt: #252528; --bg-row: #212124; --panel: #232326;
+    --fg: #ececf0; --fg-dim: #9e9ea6; --fg-faint: #6d6d75;
+    --line: #35353a; --accent: #4a95ff; --sel: #2c4a75;
+    --green: #4cd07d; --teal: #45c8d8; --orange: #f0a44a; --red: #ff6b6b;
+  }
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  font: 12px/1.45 var(--ui); color: var(--fg); background: var(--bg);
+  display: flex; flex-direction: column; overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+button, input, select { font: inherit; color: inherit; font-family: var(--ui); }
+button {
+  background: var(--bg-alt); border: 1px solid var(--line); border-radius: 5px;
+  padding: 3px 9px; cursor: pointer; white-space: nowrap;
+}
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: .45; cursor: default; }
+button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+input[type=search], input[type=text] {
+  background: var(--bg); border: 1px solid var(--line); border-radius: 5px;
+  padding: 3px 8px; min-width: 0;
+}
+select { background: var(--bg-alt); border: 1px solid var(--line); border-radius: 5px; padding: 2px 4px; }
+
+/* ---------- 顶栏 ---------- */
+#head, #filter {
+  display: flex; align-items: center; gap: 8px; padding: 7px 12px; flex: none;
+}
+#head { border-bottom: 1px solid var(--line); }
+#filter { border-bottom: 1px solid var(--line); background: var(--bg-alt); }
+#dot { font-size: 13px; color: var(--fg-faint); }
+#dot.up { color: var(--green); }
+#state { font-weight: 600; }
+#cred { color: var(--fg-dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.spacer { flex: 1 1 auto; min-width: 8px; }
+#q { flex: 1 1 auto; }
+#count { color: var(--fg-dim); font-variant-numeric: tabular-nums; font-size: 11px; text-align: right; min-width: 88px; }
+label.check { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--fg-dim); cursor: pointer; }
+
+/* ---------- 主区 ---------- */
+#main { flex: 1 1 auto; display: flex; min-height: 0; }
+#list { flex: 0 0 62%; min-width: 320px; overflow: auto; }
+#vgrip { flex: none; width: 5px; cursor: col-resize; background: var(--line); }
+#detail { flex: 1 1 auto; min-width: 260px; display: flex; flex-direction: column; min-height: 0; }
+
+table { border-collapse: collapse; width: 100%; table-layout: fixed; }
+thead th {
+  position: sticky; top: 0; z-index: 1; background: var(--bg-alt);
+  font-size: 10.5px; font-weight: 600; color: var(--fg-dim); text-align: left;
+  padding: 4px 6px; border-bottom: 1px solid var(--line); user-select: none;
+}
+tbody td {
+  padding: 3px 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  border-bottom: 1px solid transparent;
+}
+tbody tr:nth-child(even) { background: var(--bg-row); }
+tbody tr.sel, tbody tr.sel:nth-child(even) { background: var(--sel); }
+tbody tr { cursor: default; }
+.mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.right { text-align: right; }
+.dim { color: var(--fg-dim); }
+.s0 { color: var(--fg-faint); } .s2 { color: var(--green); } .s3 { color: var(--teal); }
+.s4 { color: var(--orange); } .s5 { color: var(--red); }
+#empty { padding: 24px 14px; color: var(--fg-dim); }
+
+/* ---------- 详情 ---------- */
+#meta {
+  font-family: var(--mono); font-size: 11px; color: var(--fg-dim);
+  padding: 6px 10px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: none;
+}
+#picks { display: flex; align-items: center; gap: 8px; padding: 6px 10px; flex: none; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; }
+.seg button { border: 0; border-radius: 0; background: var(--bg); padding: 3px 10px; font-size: 11px; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button.on { background: var(--accent); color: #fff; }
+.seg button:disabled { opacity: .4; }
+#panes { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; }
+#hgrip { flex: none; height: 5px; cursor: row-resize; background: var(--line); }
+.pane { display: flex; flex-direction: column; min-height: 0; background: var(--panel); }
+.pane.req { flex: 0 0 50%; }
+.pane.res { flex: 1 1 auto; }
+.pane header {
+  display: flex; align-items: center; gap: 8px; padding: 4px 8px 4px 10px;
+  border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); flex: none;
+}
+.pane h2 { font-size: 11px; font-weight: 600; margin: 0; }
+.pane .size { font-family: var(--mono); font-size: 10.5px; color: var(--fg-dim); }
+.pane pre {
+  margin: 0; flex: 1 1 auto; overflow: auto; padding: 8px 10px;
+  font-family: var(--mono); font-size: 11.5px; line-height: 1.5;
+  white-space: pre-wrap; word-break: break-word; tab-size: 4;
+}
+
+/* ---------- Console ---------- */
+#console {
+  flex: none; border-top: 1px solid var(--line); background: var(--bg-alt);
+  display: none; flex-direction: column; max-height: 42vh;
+}
+#console.open { display: flex; }
+#cmds { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 12px; align-items: center; }
+#out {
+  margin: 0; padding: 8px 12px; overflow: auto; flex: 1 1 auto; min-height: 90px;
+  font-family: var(--mono); font-size: 11.5px; white-space: pre-wrap; word-break: break-word;
+  color: var(--fg-dim); border-top: 1px solid var(--line);
+}
+#out a { color: var(--accent); }
+</style>
+</head>
+<body>
+
+<div id="head">
+  <span id="dot">●</span>
+  <span id="state">读取状态…</span>
+  <span id="cred"></span>
+  <span class="spacer"></span>
+  <button id="btn-start" disabled title="页面由代理进程本身提供 —— 进程没起来时页面也不存在, 所以只能在终端执行 `jj-agentic-proxy start`">Start</button>
+  <button id="btn-stop">Stop</button>
+  <button id="btn-console" class="active">Console…</button>
+</div>
+
+<div id="filter">
+  <input id="q" type="search" placeholder="Filter: path / model / status / surface" spellcheck="false" autocomplete="off">
+  <select id="days"></select>
+  <label class="check"><input id="follow" type="checkbox" checked> Follow</label>
+  <span id="count"></span>
+</div>
+
+<div id="main">
+  <div id="list">
+    <table>
+      <thead><tr>
+        <th style="width:116px">Time</th>
+        <th style="width:104px">Surface</th>
+        <th>Endpoint</th>
+        <th style="width:112px">Model</th>
+        <th style="width:52px" class="right">Status</th>
+        <th style="width:56px" class="right">Took</th>
+        <th style="width:104px" class="right">Req / Res</th>
+      </tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div id="empty">暂无往返记录</div>
+  </div>
+  <div id="vgrip"></div>
+  <div id="detail">
+    <div id="meta"></div>
+    <div id="picks">
+      <span class="seg" id="leg">
+        <button data-i="0" class="on">Client ↔ Proxy</button><button data-i="1">Proxy ↔ Upstream</button>
+      </span>
+      <span class="spacer"></span>
+      <span class="seg" id="view" title="核心内容 = 对话轮次 / 模型产出 / 工具调用; 原始报文 = 起始行 + header + body 原文 (⌘D 切换)">
+        <button data-i="0" class="on">核心内容</button><button data-i="1">原始报文</button>
+      </span>
+    </div>
+    <div id="panes">
+      <div class="pane req">
+        <header><h2 id="req-title">Request</h2><span class="size" id="req-size"></span><span class="spacer"></span><button data-copy="req">Copy</button></header>
+        <pre id="req-body"></pre>
+      </div>
+      <div id="hgrip"></div>
+      <div class="pane res">
+        <header><h2 id="res-title">Response</h2><span class="size" id="res-size"></span><span class="spacer"></span><button data-copy="res">Copy</button></header>
+        <pre id="res-body"></pre>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="console" class="open">
+  <div id="cmds">
+    <button data-cmd="status">Status</button>
+    <button data-cmd="models">Models</button>
+    <button data-cmd="login:anthropic">Login Anthropic</button>
+    <button data-cmd="login:codex">Login Codex</button>
+    <button data-cmd="logout:all">Logout All</button>
+    <button data-cmd="stop">Stop</button>
+    <span class="spacer"></span>
+    <button data-cmd="clear">Clear</button>
+  </div>
+  <pre id="out"></pre>
+</div>
+
+<script>
+'use strict';
+
+/* ============================================================
+   JSON 工具: 对齐 Swift JSONSerialization
+   - .sortedKeys      -> 对象键字典序 (数组保持线上原序)
+   - .prettyPrinted   -> 2 空格缩进
+   - .withoutEscapingSlashes -> JS 本来就不转义 `/`
+   ============================================================ */
+function sortDeep(v) {
+  if (Array.isArray(v)) return v.map(sortDeep);
+  if (v && typeof v === 'object') {
+    const out = {};
+    for (const k of Object.keys(v).sort()) out[k] = sortDeep(v[k]);
+    return out;
+  }
+  return v;
+}
+
+function stableJSON(v, pretty) {
+  try { return JSON.stringify(sortDeep(v), null, pretty ? 2 : 0); }
+  catch { return String(v); }
+}
+
+const asObj = v => (v && typeof v === 'object' && !Array.isArray(v)) ? v : null;
+const asArr = v => Array.isArray(v) ? v : [];
+const asStr = v => typeof v === 'string' ? v : null;
+const isNil = v => v === undefined || v === null;
+/** Swift `(x as? NSNumber)?.intValue ?? 0` —— bool 也是 NSNumber。 */
+function asInt(v) {
+  if (typeof v === 'number' && Number.isFinite(v)) return Math.trunc(v);
+  if (typeof v === 'boolean') return v ? 1 : 0;
+  return 0;
+}
+const isTrue = v => v === true || v === 1;
+
+function parseJSON(text) {
+  if (typeof text !== 'string' || text === '') return null;
+  try { return JSON.parse(text); } catch { return null; }
+}
+
+/** Swift `jsonText(_:pretty:)`: 字符串原样, 其余序列化。 */
+function jsonText(v, pretty = true) {
+  if (isNil(v)) return '';
+  if (typeof v === 'string') return v;
+  return stableJSON(v, pretty);
+}
+
+/* ---------- 字节级截断 (Swift 用 utf8.count, 这里同样按 UTF-8 字节) ---------- */
+const ENC = new TextEncoder();
+const DEC = new TextDecoder('utf-8');
+
+function clamp(s, limit, note) {
+  // UTF-8 字节数 ∈ [units, 3×units] -> 上界内直接放行, 不为大文本白算一遍编码
+  if (s.length * 3 <= limit) return s;
+  const bytes = ENC.encode(s);
+  if (bytes.length <= limit) return s;
+  return DEC.decode(bytes.subarray(0, limit)) + `\n\n… ${note} (完整内容见「原始报文」)`;
+}
+
+const TOTAL_CAP = 4 * 1024 * 1024;
+const BLOCK_CAP = 128 * 1024;
+const cap = s => clamp(s, TOTAL_CAP, '已截断展示');
+const clampBlock = s => clamp(s, BLOCK_CAP, '本段已截断');
+
+/* ============================================================
+   核心内容视图 —— app/Sources/jj-agentic-proxy/CoreContent.swift 的移植
+   把一次往返里真正有语义的东西 (对话轮次 / 模型产出 / 工具调用 / usage) 抽成纯文本。
+   覆盖三种方言, 认不出就回退成事件清单或原 JSON -> 永远给得出东西, 不空屏。
+   ============================================================ */
+const ENCRYPTED_THINKING = '（思考内容被上游加密, 只回了签名）';
+const RULE_WIDTH = 56;
+
+const DIALECT = {
+  anthropic: 'Anthropic Messages',
+  chat: 'OpenAI Chat Completions',
+  responses: 'OpenAI Responses',
+  unknown: '未知方言',
+};
+
+/** 等宽字体下的粗略显示宽度: 非 ASCII 一律按双宽算。 */
+function dispWidth(s) {
+  let n = 0;
+  for (const ch of s) n += ch.codePointAt(0) < 128 ? 1 : 2;
+  return n;
+}
+
+function rule(label) {
+  const used = 4 + dispWidth(label); // `── ` 占 3 列 + 尾随空格
+  return `── ${label} ` + '─'.repeat(Math.max(3, RULE_WIDTH - used));
+}
+
+function indent(s, n) {
+  const pad = ' '.repeat(n);
+  return s.split('\n').map(l => pad + l).join('\n');
+}
+
+/** 嵌套内容: 一行标记 + 缩进正文。 */
+function mark(label, body) {
+  const text = (body || '').trim();
+  if (!text) return `▸ ${label}`;
+  if (!text.includes('\n') && [...text].length <= 100) return `▸ ${label}  ${text}`;
+  return `▸ ${label}\n` + indent(text, 4);
+}
+
+/** 工具参数是逐帧拼出来的 JSON 文本: 拼完整就缩进展示, 没拼完就原样。 */
+function prettyJSON(s) {
+  const text = (s || '').trim();
+  if (!text) return s || '';
+  const v = parseJSON(text);
+  return v === null ? s : jsonText(v);
+}
+
+function scalar(v) {
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number') return String(v);
+  return jsonText(v, false);
+}
+
+function isEmptyObject(v) {
+  const d = asObj(v);
+  if (d) return Object.keys(d).length === 0;
+  if (typeof v === 'string') return v === '';
+  return isNil(v);
+}
+
+/**
+ * usage 摊平成一行: 只留非 0 计数 (上游把没用上的计数也一并回, 全留就没法看),
+ * 字符串项 (service_tier / inference_geo) 是投放元信息, 不是用量, 不进这行。
+ */
+function usageLine(v) {
+  const d = asObj(v);
+  if (!d) return null;
+  const out = [];
+  flattenUsage(d, '', out);
+  return out.join(' · ');
+}
+
+function flattenUsage(d, prefix, out) {
+  for (const key of Object.keys(d).sort()) {
+    const name = prefix ? `${prefix}.${key}` : key;
+    const v = d[key];
+    if (typeof v === 'number' && Math.trunc(v) !== 0) {
+      out.push(`${name.endsWith('_tokens') ? name.slice(0, -7) : name} ${Math.trunc(v)}`);
+    } else {
+      const sub = asObj(v);
+      if (sub) flattenUsage(sub, name, out);
+    }
+  }
+}
+
+/* ---------- 段与文档 ---------- */
+class Doc {
+  constructor() { this.head = []; this.blocks = []; }
+  render() {
+    const out = this.head.slice();
+    if (!this.blocks.length) out.push('\n（本次没有内容产出）');
+    for (const b of this.blocks) {
+      out.push('');
+      out.push(rule(b.label));
+      const body = b.isJSON ? prettyJSON(b.body) : b.body;
+      if (!body) out.push(b.note || '（空）');
+      else out.push(clampBlock(body));
+    }
+    return cap(out.join('\n'));
+  }
+}
+
+/** 增量事件按 key 归并到同一段, 顺序 = 首次出现顺序。 */
+class Builder {
+  constructor() {
+    this.head = ''; this.model = ''; this.id = ''; this.stop = '';
+    this.usage = null; this.done = false;
+    this.frameCount = 0; this.frameBreakdown = '';
+    this.notes = []; this.blocks = []; this.index = new Map();
+  }
+  /** labelWins = 用这次的 label 覆盖既有的 (start 事件比 delta 知道得多)。 */
+  append(key, label, chunk = '', labelWins = false) {
+    const i = this.index.get(key);
+    if (i !== undefined) {
+      if (labelWins) this.blocks[i].label = label;
+      this.blocks[i].body += chunk;
+      return;
+    }
+    this.index.set(key, this.blocks.length);
+    this.blocks.push({ label, body: chunk, isJSON: false, note: '' });
+  }
+  markJSON(key) {
+    const i = this.index.get(key);
+    if (i !== undefined) this.blocks[i].isJSON = true;
+  }
+  note(key, text) {
+    const i = this.index.get(key);
+    if (i !== undefined) this.blocks[i].note = text;
+  }
+  isEmptyBlock(key) {
+    const i = this.index.get(key);
+    return i === undefined || this.blocks[i].body === '';
+  }
+  doc() {
+    const d = new Doc();
+    let line = this.head;
+    if (this.frameCount > 0) {
+      line += ` · SSE ${this.frameCount} 帧`;
+      line += this.done ? ' · 已完整收尾' : ' · ⚠︎ 未见收尾事件';
+    }
+    d.head.push(line);
+
+    const facts = [];
+    if (this.model) facts.push(`model ${this.model}`);
+    if (this.id) facts.push(`id ${this.id}`);
+    if (this.stop) facts.push(`stop ${this.stop}`);
+    if (facts.length) d.head.push(facts.join(' · '));
+    if (this.usage) d.head.push(`usage ${this.usage}`);
+    if (this.frameBreakdown) d.head.push(`帧 ${this.frameBreakdown}`);
+
+    d.blocks = this.blocks.slice();
+    if (this.notes.length) {
+      d.blocks.push({ label: '其余帧', body: this.notes.join('\n'), isJSON: false, note: '' });
+    }
+    return d;
+  }
+}
+
+function appendBlock(doc, label, text) {
+  if (!text) return;
+  doc.blocks.push({ label, body: text, isJSON: false, note: '' });
+}
+
+/** 错误信封 (两家方言 + 本代理自产) -> 一段; 返回是否命中。 */
+function errorBlock(v, b) {
+  let err = v.error;
+  if (isNil(err)) err = asStr(v.type) === 'error' ? v : null;
+  if (isNil(err)) return false;
+  b.append(`error#${b.blocks.length}`, '⚠︎ error', jsonText(err));
+  return true;
+}
+
+/* ---------- 方言判定 ---------- */
+function dialectOf(path, body) {
+  if (path.includes('/messages')) return 'anthropic';
+  if (path.includes('/chat/completions')) return 'chat';
+  if (path.includes('/responses')) return 'responses';
+  if (!isNil(body.choices) || (asStr(body.object) || '').startsWith('chat.completion')) return 'chat';
+  if (Array.isArray(body.output) || !isNil(body.input)) return 'responses';
+  if (Array.isArray(body.content) || !isNil(body.system)) return 'anthropic';
+  if (Array.isArray(body.messages)) return 'chat';
+  return 'unknown';
+}
+
+const ANTHROPIC_EVENTS = new Set([
+  'message_start', 'message_delta', 'message_stop',
+  'content_block_start', 'content_block_delta', 'content_block_stop', 'ping',
+]);
+
+function sseDialect(event, type, payload) {
+  if (type.startsWith('response.') || event.startsWith('response.')) return 'responses';
+  if (ANTHROPIC_EVENTS.has(type) || ANTHROPIC_EVENTS.has(event)) return 'anthropic';
+  if (!isNil(payload.choices)) return 'chat';
+  return 'unknown';
+}
+
+/* ---------- SSE: 一帧 = `event:` + 若干 `data:`, 空行分隔 ---------- */
+function isSSE(s) {
+  const head = s.slice(0, 4096);
+  return head.startsWith('data:') || head.startsWith('event:')
+    || head.includes('\ndata:') || head.includes('\nevent:');
+}
+
+function sseFrames(text) {
+  const out = [];
+  let cur = { name: '', data: '' };
+  let open = false;
+  for (const raw of text.split('\n')) {
+    const line = raw.endsWith('\r') ? raw.slice(0, -1) : raw;
+    if (line === '') {
+      if (open) out.push(cur);
+      cur = { name: '', data: '' };
+      open = false;
+      continue;
+    }
+    if (line.startsWith(':')) continue; // 注释 / keep-alive
+    let field = line, value = '';
+    const colon = line.indexOf(':');
+    if (colon >= 0) {
+      field = line.slice(0, colon);
+      value = line.slice(colon + 1);
+      if (value.startsWith(' ')) value = value.slice(1);
+    }
+    if (field === 'event') { cur.name = value; open = true; }
+    else if (field === 'data') {
+      if (cur.data !== '') cur.data += '\n';
+      cur.data += value;
+      open = true;
+    }
+  }
+  if (open) out.push(cur);
+  return out;
+}
+
+function renderSSE(path, text) {
+  const list = sseFrames(text);
+  if (!list.length) return cap(text);
+
+  const b = new Builder();
+  b.frameCount = list.length;
+  const counts = new Map();
+  const bump = k => counts.set(k, (counts.get(k) || 0) + 1);
+  let kind = 'unknown';
+
+  for (const f of list) {
+    const tag = f.name || 'chunk';
+    if (f.data === '[DONE]') { b.done = true; bump('[DONE]'); continue; }
+    const payload = asObj(parseJSON(f.data));
+    if (!payload) {
+      bump(tag);
+      if (f.data && (f.name !== '' || !f.data.startsWith('{'))) {
+        b.notes.push(`${tag}: ${f.data.slice(0, 200)}`);
+      }
+      continue;
+    }
+    const type = asStr(payload.type) || '';
+    bump(type || tag);
+    if (kind === 'unknown') kind = sseDialect(f.name, type, payload);
+
+    if (kind === 'anthropic') absorbAnthropicEvent(type, payload, b);
+    else if (kind === 'chat') absorbChatChunk(payload, b);
+    else if (kind === 'responses') absorbResponsesEvent(type, payload, b);
+    else errorBlock(payload, b);
+  }
+
+  b.head = kind === 'unknown' ? 'SSE (未知方言)' : DIALECT[kind];
+  b.frameBreakdown = [...counts.entries()]
+    .sort((x, y) => x[1] === y[1] ? (x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0) : y[1] - x[1])
+    .slice(0, 6)
+    .map(([k, n]) => `${k} ${n}`)
+    .join(' · ');
+  if (kind === 'unknown') {
+    // 方言认不出: 至少把每帧压成一行, 比几百行原文好读
+    b.notes = list.slice(0, 200).map(f => `${f.name || '-'}  ${f.data.slice(0, 160)}`);
+    if (list.length > 200) b.notes.push(`… 其余 ${list.length - 200} 帧略`);
+  }
+  return b.doc().render();
+}
+
+/* ---------- Anthropic Messages ---------- */
+function anthropicLabel(block) {
+  const type = asStr(block.type) || 'block';
+  if (type !== 'tool_use' && type !== 'server_tool_use') return type;
+  let out = type;
+  if (asStr(block.name)) out += ` · ${block.name}`;
+  if (asStr(block.id)) out += ` #${block.id}`;
+  return out;
+}
+
+function absorbAnthropicEvent(type, v, b) {
+  switch (type) {
+    case 'message_start': {
+      const msg = asObj(v.message);
+      if (!msg) return;
+      b.model = asStr(msg.model) || b.model;
+      b.id = asStr(msg.id) || b.id;
+      b.usage = usageLine(msg.usage);
+      return;
+    }
+    case 'content_block_start': {
+      const idx = asInt(v.index);
+      const block = asObj(v.content_block);
+      if (!block) return;
+      const key = `b${idx}`;
+      b.append(key, anthropicLabel(block), '', true);
+      // start 里可能已带首段内容
+      if (asStr(block.text) !== null) b.append(key, anthropicLabel(block), block.text);
+      if (asStr(block.thinking) !== null) b.append(key, anthropicLabel(block), block.thinking);
+      if (!isNil(block.input) && !isEmptyObject(block.input)) {
+        b.append(key, anthropicLabel(block), jsonText(block.input));
+      }
+      return;
+    }
+    case 'content_block_delta': {
+      const idx = asInt(v.index);
+      const key = `b${idx}`;
+      const d = asObj(v.delta);
+      if (!d) return;
+      switch (asStr(d.type) || '') {
+        case 'text_delta': b.append(key, 'text', asStr(d.text) || ''); return;
+        case 'thinking_delta': b.append(key, 'thinking', asStr(d.thinking) || ''); return;
+        case 'input_json_delta':
+          b.append(key, 'tool_use', asStr(d.partial_json) || '');
+          b.markJSON(key);
+          return;
+        case 'citations_delta': return; // 引文元数据, 不进正文
+        // 签名本身无阅读价值; 只回签名不回正文 = 上游加密了思考, 得说清楚
+        case 'signature_delta': b.note(key, ENCRYPTED_THINKING); return;
+        default: b.append(key, asStr(d.type) || 'delta', jsonText(d)); return;
+      }
+    }
+    case 'message_delta': {
+      const d = asObj(v.delta);
+      if (d) {
+        b.stop = asStr(d.stop_reason) || b.stop;
+        if (asStr(d.stop_sequence)) b.stop += ` (${d.stop_sequence})`;
+      }
+      const u = usageLine(v.usage);
+      if (u) b.usage = u;
+      return;
+    }
+    case 'message_stop': b.done = true; return;
+    case 'error': errorBlock(v, b); return;
+    default: return; // ping 等无语义事件
+  }
+}
+
+/** 非流式 Anthropic 响应对象。 */
+function absorbAnthropicMessage(v, b) {
+  b.model = asStr(v.model) || '';
+  b.id = asStr(v.id) || '';
+  b.stop = asStr(v.stop_reason) || '';
+  b.usage = usageLine(v.usage);
+  b.done = true;
+  asArr(v.content).forEach((raw, i) => {
+    const block = asObj(raw);
+    if (!block) return;
+    const label = anthropicLabel(block);
+    const key = `b${i}`;
+    switch (asStr(block.type) || '') {
+      case 'text': b.append(key, label, asStr(block.text) || ''); break;
+      case 'thinking':
+        b.append(key, label, asStr(block.thinking) || '');
+        if (!isNil(block.signature)) b.note(key, ENCRYPTED_THINKING);
+        break;
+      default: b.append(key, label, jsonText(isNil(block.input) ? block : block.input)); break;
+    }
+  });
+  errorBlock(v, b);
+}
+
+/* ---------- OpenAI Chat Completions ---------- */
+function absorbChatChunk(v, b) {
+  if (errorBlock(v, b)) return;
+  b.model = asStr(v.model) || b.model;
+  b.id = asStr(v.id) || b.id;
+  const u = usageLine(v.usage);
+  if (u) b.usage = u;
+  const choice = asObj(asArr(v.choices)[0]);
+  if (!choice) return;
+  if (asStr(choice.finish_reason)) {
+    b.stop = choice.finish_reason;
+    b.done = true;
+  }
+  const d = asObj(choice.delta) || asObj(choice.message);
+  if (d) absorbChatDelta(d, b);
+}
+
+/** delta 与非流式 message 形状一致 -> 同一处消化。 */
+function absorbChatDelta(d, b) {
+  if (asStr(d.reasoning_content)) b.append('reasoning', 'reasoning', d.reasoning_content);
+  if (asStr(d.content)) b.append('content', 'text', d.content);
+  else if (Array.isArray(d.content)) b.append('content', 'text', contentText(d.content));
+  for (const raw of asArr(d.tool_calls)) {
+    const call = asObj(raw);
+    if (!call) continue;
+    const key = `tool${asInt(call.index)}`;
+    const fn = asObj(call.function) || {};
+    let label = 'tool_call';
+    if (asStr(fn.name)) label += ` · ${fn.name}`;
+    if (asStr(call.id)) label += ` #${call.id}`;
+    if (label !== 'tool_call') b.append(key, label, '', true);
+    if (asStr(fn.arguments)) {
+      b.append(key, label, fn.arguments);
+      b.markJSON(key);
+    }
+  }
+}
+
+/** 非流式 Chat Completions 响应对象。 */
+function absorbChatMessage(v, b) {
+  b.model = asStr(v.model) || '';
+  b.id = asStr(v.id) || '';
+  b.usage = usageLine(v.usage);
+  b.done = true;
+  for (const raw of asArr(v.choices)) {
+    const choice = asObj(raw);
+    if (!choice) continue;
+    b.stop = asStr(choice.finish_reason) || b.stop;
+    const msg = asObj(choice.message);
+    if (msg) absorbChatDelta(msg, b);
+  }
+  errorBlock(v, b);
+}
+
+/* ---------- OpenAI Responses ---------- */
+function responsesToolLabel(item) {
+  let out = 'tool_call';
+  if (asStr(item.name)) out += ` · ${item.name}`;
+  const id = asStr(item.call_id) ?? asStr(item.id);
+  if (id !== null) out += ` #${id}`;
+  return out;
+}
+
+function absorbResponsesEvent(type, v, b) {
+  switch (type) {
+    case 'response.created':
+    case 'response.in_progress': {
+      const r = asObj(v.response);
+      if (r) {
+        b.model = asStr(r.model) || b.model;
+        b.id = asStr(r.id) || b.id;
+      }
+      return;
+    }
+    case 'response.output_text.delta':
+      b.append('text', 'text', asStr(v.delta) || '');
+      return;
+    case 'response.reasoning_summary_text.delta':
+    case 'response.reasoning_text.delta':
+      b.append('reasoning', 'reasoning', asStr(v.delta) || '');
+      return;
+    case 'response.output_item.added':
+    case 'response.output_item.done': {
+      const item = asObj(v.item);
+      if (!item || asStr(item.type) !== 'function_call') return;
+      const key = `tool:${asStr(item.id) ?? String(asInt(v.output_index))}`;
+      b.append(key, responsesToolLabel(item), '', true);
+      // done 才带完整 arguments; 增量已拼过就不重复追加
+      if (type === 'response.output_item.done' && b.isEmptyBlock(key) && asStr(item.arguments)) {
+        b.append(key, responsesToolLabel(item), item.arguments);
+        b.markJSON(key);
+      }
+      return;
+    }
+    case 'response.function_call_arguments.delta': {
+      const key = `tool:${asStr(v.item_id) ?? String(asInt(v.output_index))}`;
+      b.append(key, 'tool_call', asStr(v.delta) || '');
+      b.markJSON(key);
+      return;
+    }
+    case 'response.completed':
+    case 'response.incomplete':
+    case 'response.failed': {
+      b.done = true;
+      const r = asObj(v.response);
+      if (!r) return;
+      b.model = asStr(r.model) || b.model;
+      b.id = asStr(r.id) || b.id;
+      b.usage = usageLine(r.usage);
+      b.stop = asStr(r.status) || (type === 'response.failed' ? 'failed' : b.stop);
+      const d = asObj(r.incomplete_details);
+      if (d) b.stop += ` (${asStr(d.reason) ?? jsonText(d, false)})`;
+      errorBlock(r, b);
+      return;
+    }
+    default: return; // .done / .delta 的收尾事件与增量重复, 忽略
+  }
+}
+
+/** 非流式 Responses 对象。 */
+function absorbResponsesObject(v, b) {
+  b.model = asStr(v.model) || '';
+  b.id = asStr(v.id) || '';
+  b.stop = asStr(v.status) || '';
+  b.usage = usageLine(v.usage);
+  b.done = true;
+  asArr(v.output).forEach((raw, i) => {
+    const item = asObj(raw);
+    if (!item) return;
+    const key = `o${i}`;
+    switch (asStr(item.type) || '') {
+      case 'message': b.append(key, 'text', contentText(item.content)); break;
+      case 'reasoning': {
+        const text = contentText(item.summary) + contentText(item.content);
+        if (text) b.append(key, 'reasoning', text);
+        break;
+      }
+      case 'function_call':
+        b.append(key, responsesToolLabel(item), asStr(item.arguments) || '');
+        b.markJSON(key);
+        break;
+      default: b.append(key, asStr(item.type) || 'item', jsonText(item)); break;
+    }
+  });
+  errorBlock(v, b);
+}
+
+/* ---------- 请求侧: 参数行 + 对话轮次 ---------- */
+const PARAM_KEYS = [
+  'max_tokens', 'max_output_tokens', 'max_completion_tokens', 'temperature',
+  'top_p', 'top_k', 'reasoning_effort', 'service_tier', 'previous_response_id',
+];
+
+function paramLines(d) {
+  const out = [];
+  const head = [];
+  if (asStr(d.model)) head.push(`model ${d.model}`);
+  if (isTrue(d.stream)) head.push('stream');
+  for (const key of PARAM_KEYS) {
+    if (!isNil(d[key])) head.push(`${key} ${scalar(d[key])}`);
+  }
+  const reasoning = asObj(d.reasoning);
+  if (reasoning) head.push(`reasoning ${jsonText(reasoning, false)}`);
+  const format = isNil(d.response_format) ? d.text : d.response_format;
+  if (!isNil(format)) head.push(`format ${jsonText(format, false)}`);
+  if (head.length) out.push(head.join(' · '));
+
+  const tools = asArr(d.tools);
+  if (tools.length) {
+    const names = [];
+    for (const raw of tools) {
+      const t = asObj(raw);
+      if (!t) continue;
+      const name = asStr(t.name) ?? asStr((asObj(t.function) || {}).name) ?? asStr(t.type);
+      if (name !== null) names.push(name);
+    }
+    let line = `tools(${tools.length}) ${names.join(' · ')}`;
+    if (!isNil(d.tool_choice)) line += `  ·  tool_choice ${jsonText(d.tool_choice, false)}`;
+    out.push(line);
+  } else if (!isNil(d.tool_choice)) {
+    out.push(`tool_choice ${jsonText(d.tool_choice, false)}`);
+  }
+  return out;
+}
+
+function appendTurns(doc, list) {
+  list.forEach((raw, i) => {
+    const msg = asObj(raw);
+    if (!msg) {
+      appendBlock(doc, `[${i + 1}]`, jsonText(raw));
+      return;
+    }
+    const [label, text] = turn(msg, i + 1);
+    doc.blocks.push({ label, body: text, isJSON: false, note: '' });
+  });
+}
+
+/**
+ * 一轮消息 -> [标题, 正文]。Anthropic / OpenAI / Responses 三种形状同处消化:
+ * 结构上互不冲突, 分方言反而多三份几乎一样的代码。
+ */
+function turn(msg, index) {
+  const type = asStr(msg.type) || '';
+  let role = asStr(msg.role) || type;
+  const parts = [];
+
+  if (type === 'function_call') {
+    // Responses: 工具调用是独立 input 项 (名字进标题, 这里只补 id + 参数)
+    role = 'function_call';
+    const id = asStr(msg.call_id) ?? asStr(msg.id) ?? '?';
+    parts.push(mark(`arguments #${id}`, prettyJSON(asStr(msg.arguments) || '')));
+  } else if (type === 'function_call_output') {
+    role = 'function_call_output';
+    const id = asStr(msg.call_id) ?? '?';
+    parts.push(mark(`output #${id}`, contentText(msg.output)));
+  } else {
+    const text = contentText(msg.content);
+    if (text) parts.push(text);
+    if (asStr(msg.reasoning_content)) parts.push(mark('reasoning', msg.reasoning_content));
+    // OpenAI: assistant 的工具调用另挂 tool_calls, 工具结果是 role=tool 的独立消息
+    for (const raw of asArr(msg.tool_calls)) {
+      const call = asObj(raw);
+      if (!call) continue;
+      const fn = asObj(call.function) || {};
+      let label = 'tool_call';
+      if (asStr(fn.name) !== null) label += ` · ${fn.name}`;
+      if (asStr(call.id) !== null) label += ` #${call.id}`;
+      parts.push(mark(label, prettyJSON(asStr(fn.arguments) || '')));
+    }
+    if (asStr(msg.tool_call_id) !== null) {
+      role = 'tool';
+      parts.unshift(`↳ 对应 #${msg.tool_call_id}`);
+    }
+  }
+
+  let label = `[${index}] ${role || 'message'}`;
+  if (asStr(msg.name) !== null) label += ` · ${msg.name}`;
+  return [label, parts.join('\n')];
+}
+
+/** content 字段 -> 纯文本。String / 分块数组 / 任意 JSON 都吃得下。 */
+function contentText(any) {
+  if (isNil(any)) return '';
+  if (typeof any === 'string') return any;
+  if (Array.isArray(any)) return any.map(contentPart).filter(s => s !== '').join('\n');
+  if (asObj(any)) return contentPart(any);
+  return jsonText(any);
+}
+
+function contentPart(any) {
+  const p = asObj(any);
+  if (!p) return isNil(any) ? '' : String(any);
+  switch (asStr(p.type) || '') {
+    case 'text': case 'input_text': case 'output_text':
+    case 'summary_text': case 'reasoning_text':
+      return asStr(p.text) || '';
+    case 'thinking':
+      return mark('thinking', asStr(p.thinking) || '');
+    case 'redacted_thinking':
+      return mark('redacted_thinking', '（已加密, 不可读）');
+    case 'tool_use': case 'server_tool_use':
+      return mark(anthropicLabel(p), jsonText(p.input));
+    case 'tool_result': {
+      const id = asStr(p.tool_use_id) ?? '?';
+      const bad = isTrue(p.is_error) ? ' ⚠︎ error' : '';
+      return mark(`tool_result #${id}${bad}`, contentText(p.content));
+    }
+    case 'image': case 'input_image': {
+      const src = asObj(p.source) || {};
+      const url = asStr(p.image_url) ?? asStr(src.url);
+      if (url !== null) return mark('image', url.slice(0, 120));
+      const media = asStr(src.media_type) ?? '?';
+      const bytes = (asStr(src.data) || '').length;
+      return mark('image', `${media}, base64 ${bytes} 字符`);
+    }
+    case 'image_url': {
+      const url = asStr((asObj(p.image_url) || {}).url) || '';
+      return mark('image', url.slice(0, 120));
+    }
+    case 'document':
+      return mark('document', jsonText(p.source, false).slice(0, 200));
+    default:
+      if (asStr(p.text) !== null) return p.text;
+      return jsonText(p);
+  }
+}
+
+/* ---------- 回退 ---------- */
+function fallback(body) {
+  if (isNil(body)) return '（空）';
+  if (typeof body === 'string') return cap(body);
+  return cap('（无对话结构, 原样展示）\n' + jsonText(body));
+}
+
+/* ---------- 入口 ---------- */
+const Core = {
+  /** 请求体 -> 对话视图 (system / 逐轮消息 / 工具调用与结果)。 */
+  request(path, body) {
+    const dict = asObj(body);
+    if (!dict) return fallback(body);
+    const doc = new Doc();
+    const kind = dialectOf(path, dict);
+    doc.head.push(DIALECT[kind]);
+    doc.head.push(...paramLines(dict));
+
+    if (kind === 'responses') {
+      appendBlock(doc, 'instructions', contentText(dict.instructions));
+      appendTurns(doc, asArr(dict.input));
+    } else {
+      appendBlock(doc, 'system', contentText(dict.system));
+      appendTurns(doc, asArr(dict.messages));
+    }
+    // 一条消息都没有 (count_tokens / models / 非对话请求) -> 原 JSON 比空视图有用
+    if (!doc.blocks.length) return fallback(body);
+    return doc.render();
+  },
+
+  /** 响应体 -> 模型产出视图。SSE 先重建成完整消息再排版。 */
+  response(path, body) {
+    if (typeof body === 'string') return isSSE(body) ? renderSSE(path, body) : cap(body);
+    const dict = asObj(body);
+    if (!dict) return fallback(body);
+    const b = new Builder();
+    const kind = dialectOf(path, dict);
+    if (kind === 'anthropic') { b.head = DIALECT.anthropic; absorbAnthropicMessage(dict, b); }
+    else if (kind === 'chat') { b.head = DIALECT.chat; absorbChatMessage(dict, b); }
+    else if (kind === 'responses') { b.head = DIALECT.responses; absorbResponsesObject(dict, b); }
+    else if (errorBlock(dict, b)) { b.head = '错误响应'; }
+    else return fallback(body);
+
+    if (!b.blocks.length && !errorBlock(dict, b)) return fallback(body);
+    return b.doc().render();
+  },
+};
+
+/* ============================================================
+   原始报文视图 —— TrafficReader.swift 的 http()/text() 移植
+   ============================================================ */
+function bodyText(v) {
+  if (isNil(v)) return '（空）';
+  if (typeof v === 'string') return cap(v);
+  return cap(stableJSON(v, true));
+}
+
+/** 起始行 + header (按名排序) + 空行 + body -> 一段可读的 HTTP 报文。 */
+function httpText(start, headers, body, bodyNote = '') {
+  const lines = [start];
+  const map = asObj(headers);
+  if (map) {
+    for (const key of Object.keys(map).sort()) lines.push(`${key}: ${map[key] ?? ''}`);
+  }
+  lines.push('');
+  lines.push(bodyNote || bodyText(body));
+  return lines.join('\n');
+}
+
+function statusLine(code) {
+  const n = asInt(code);
+  return n === 0 ? 'HTTP —  (没等到响应)' : `HTTP ${n}`;
+}
+
+const bothLegs = text => ({ raw: text, core: text });
+
+/** 一条往返的两条腿 × 两种读法 (对齐 TrafficReader.detail)。 */
+function buildDetail(line) {
+  const dict = asObj(line);
+  if (!dict) return { clientRequest: bothLegs('这一行解析失败'), clientResponse: bothLegs(''),
+                      upstreamRequest: bothLegs(''), upstreamResponse: bothLegs(''), hasUpstream: false };
+  const method = asStr(dict.method) ?? '?';
+  const path = asStr(dict.path) ?? '?';
+  const out = {
+    clientRequest: {
+      raw: httpText(`${method} ${path}`, dict.req_headers, dict.req),
+      core: Core.request(path, dict.req),
+    },
+    clientResponse: {
+      raw: httpText(statusLine(dict.status), dict.res_headers, dict.res),
+      core: Core.response(path, dict.res),
+    },
+    upstreamRequest: bothLegs(''),
+    upstreamResponse: bothLegs(''),
+    hasUpstream: false,
+  };
+
+  const up = asObj(dict.upstream);
+  if (!up) return out;
+  out.hasUpstream = true;
+  const upMethod = asStr(up.method) ?? '?';
+  const upURL = asStr(up.url) ?? '?';
+  // req_body 只在本层改写过时才落盘 -> 缺席即等同客户端请求体
+  const changed = !isNil(up.req_body);
+  const upBody = changed ? up.req_body : dict.req;
+  const note = changed ? '' : '（请求体未被本层改写, 与客户端一致）\n';
+  out.upstreamRequest = {
+    raw: note + httpText(`${upMethod} ${upURL}`, up.req_headers, upBody),
+    core: note + Core.request(upURL, upBody),
+  };
+  out.upstreamResponse = bothLegs(httpText(
+    statusLine(up.status), up.res_headers, null,
+    '（上游响应体不单独记录: 透传面与客户端一致, 转换面见 Client 的 Response）',
+  ));
+  return out;
+}
+
+/* ============================================================
+   界面
+   ============================================================ */
+const $ = id => document.getElementById(id);
+const FOLLOW_MS = 1500;
+
+const S = {
+  day: '',
+  all: [],        // 文件顺序: 旧 -> 新
+  rows: [],       // 展示顺序: 新 -> 旧
+  consumed: 0,
+  nextSeq: 0,
+  selectedSeq: null,
+  detail: null,
+  detailToken: 0,
+  leg: 0,         // 0 = Client ↔ Proxy, 1 = Proxy ↔ Upstream
+  view: 0,        // 0 = 核心内容, 1 = 原始报文
+  scanning: false,
+  loginTimer: null,
+};
+
+const api = async (path, init) => {
+  const r = await fetch(path, init);
+  const text = await r.text();
+  let data = null;
+  try { data = JSON.parse(text); } catch { /* 非 JSON: 交给调用方看 raw */ }
+  if (!r.ok) throw new Error((data && data.error) || `HTTP ${r.status}`);
+  return data;
+};
+
+/* ---------- 记录格式化 (对齐 TrafficRecord.swift) ---------- */
+const clockOf = ts => {
+  const at = ts.indexOf('T');
+  return at < 0 ? ts : ts.slice(at + 1, at + 13);
+};
+
+const statusText = r => r.status === 0 ? '—' : String(r.status);
+
+const elapsedText = r => r.elapsed_ms < 1000 ? `${r.elapsed_ms}ms` : `${(r.elapsed_ms / 1000).toFixed(1)}s`;
+
+function sizeText(bytes) {
+  if (!bytes) return '—';
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+}
+
+function summaryOf(r) {
+  let out = `${clockOf(r.ts)} · ${r.method} ${r.path} · ${r.surface} · ${statusText(r)} · ${elapsedText(r)}`;
+  if (r.model) out += ` · ${r.model}`;
+  if (r.stream) out += ' · stream';
+  if (r.incomplete) out += ` · ⚠︎ ${r.incomplete}`;
+  return out;
+}
+
+function haystackOf(r) {
+  if (r._hay === undefined) {
+    r._hay = [r.ts, r.surface, r.method, r.path, r.status === 0 ? '' : String(r.status),
+             r.model || '', r.incomplete || ''].join(' ').toLowerCase();
+  }
+  return r._hay;
+}
+
+const statusClass = r => r.status === 0 ? 's0'
+  : r.status < 300 ? 's2' : r.status < 400 ? 's3' : r.status < 500 ? 's4' : 's5';
+
+/* ---------- 日期 / 扫描 ---------- */
+async function reloadDays(wanted) {
+  let days = [];
+  try { days = (await api('/api/days')).days || []; } catch { /* 目录还不存在 */ }
+  const target = wanted || (days.includes(S.day) ? S.day : days[0]);
+  const sel = $('days');
+  sel.innerHTML = '';
+  for (const d of (days.length ? days : ['无记录'])) {
+    const o = document.createElement('option');
+    o.value = o.textContent = d;
+    sel.appendChild(o);
+  }
+  sel.disabled = !days.length;
+  if (!target || !days.includes(target)) {
+    S.day = ''; S.all = [];
+    applyFilter();
+    return;
+  }
+  sel.value = target;
+  if (target !== S.day) {
+    S.day = target; S.all = []; S.consumed = 0; S.nextSeq = 0;
+  }
+  await scan(true);
+}
+
+async function scan(reset) {
+  if (S.scanning || !S.day) return;
+  S.scanning = true;
+  const target = S.day;
+  const from = reset ? 0 : S.consumed;
+  const seq = reset ? 0 : S.nextSeq;
+  try {
+    const b = await api(`/api/scan/${encodeURIComponent(target)}/${from}/${seq}`);
+    if (target !== S.day) return; // 期间用户切了日期
+    const hard = reset || b.reset;
+    if (hard) S.all = b.records;
+    else if (!b.records.length) { S.consumed = b.consumed; return; } // 无新记录: 不动列表
+    else S.all = S.all.concat(b.records);
+    S.consumed = b.consumed;
+    S.nextSeq = b.next_seq;
+    applyFilter();
+  } catch (e) {
+    console.warn('扫描失败', e);
+  } finally {
+    S.scanning = false;
+  }
+}
+
+/* ---------- 过滤 / 列表 ---------- */
+function applyFilter() {
+  const terms = $('q').value.toLowerCase().split(/[\s\t]+/).filter(Boolean);
+  const matched = terms.length
+    ? S.all.filter(r => terms.every(t => haystackOf(r).includes(t)))
+    : S.all;
+  S.rows = matched.slice().reverse();
+
+  renderRows();
+  $('count').textContent = terms.length
+    ? `${S.rows.length} / ${S.all.length} 条`
+    : `${S.all.length} 条`;
+
+  // 选中态按 seq 恢复: follow 追加新记录时不跳走
+  const idx = S.selectedSeq === null ? -1 : S.rows.findIndex(r => r.seq === S.selectedSeq);
+  if (idx >= 0) markSelected(idx);
+  else if (S.selectedSeq === null && S.rows.length) select(0);
+  else if (!S.rows.length) showDetail(null);
+}
+
+function renderRows() {
+  const body = $('rows');
+  const frag = document.createDocumentFragment();
+  for (const r of S.rows) {
+    const tr = document.createElement('tr');
+    tr.dataset.seq = r.seq;
+    const cells = [
+      ['mono', clockOf(r.ts)],
+      ['dim', r.surface],
+      ['', `${r.method} ${r.path}`],
+      ['', r.model || '—'],
+      [`mono right ${statusClass(r)}`, statusText(r)],
+      ['mono right', elapsedText(r)],
+      ['mono right', `${sizeText(r.req_bytes)} / ${sizeText(r.res_bytes)}`],
+    ];
+    for (const [cls, text] of cells) {
+      const td = document.createElement('td');
+      if (cls) td.className = cls;
+      td.textContent = text;
+      td.title = text;
+      tr.appendChild(td);
+    }
+    frag.appendChild(tr);
+  }
+  body.replaceChildren(frag);
+  $('empty').style.display = S.rows.length ? 'none' : 'block';
+  if (S.selectedSeq !== null) {
+    const i = S.rows.findIndex(r => r.seq === S.selectedSeq);
+    if (i >= 0) body.children[i].classList.add('sel');
+  }
+}
+
+function markSelected(idx) {
+  const body = $('rows');
+  for (const tr of body.children) tr.classList.remove('sel');
+  const tr = body.children[idx];
+  if (!tr) return;
+  tr.classList.add('sel');
+  tr.scrollIntoView({ block: 'nearest' });
+}
+
+function select(idx) {
+  const rec = S.rows[idx];
+  if (!rec) return;
+  S.selectedSeq = rec.seq;
+  markSelected(idx);
+  showDetail(rec);
+}
+
+/* ---------- 详情 ---------- */
+async function showDetail(rec) {
+  S.detailToken += 1;
+  S.detail = null;
+  if (!rec) {
+    $('meta').textContent = '';
+    for (const k of ['req', 'res']) {
+      $(`${k}-body`).textContent = '';
+      $(`${k}-size`).textContent = '';
+    }
+    return;
+  }
+  $('meta').textContent = summaryOf(rec);
+  $('req-size').textContent = sizeText(rec.req_bytes);
+  $('res-size').textContent = sizeText(rec.res_bytes);
+  $('req-body').textContent = '读取中…';
+  $('res-body').textContent = '';
+
+  const token = S.detailToken;
+  const target = S.day;
+  try {
+    const line = await api(
+      `/api/detail/${encodeURIComponent(target)}/${rec.offset}/${rec.length}`);
+    if (token !== S.detailToken) return; // 期间又换了选中行
+    S.detail = buildDetail(line);
+    renderDetail();
+  } catch (e) {
+    if (token !== S.detailToken) return;
+    $('req-body').textContent = `读取失败: ${e.message}`;
+  }
+}
+
+/** 两条腿 × 两种读法共用同一对面板: 只换文本, 不重取也不重新解析。 */
+function renderDetail() {
+  const d = S.detail;
+  const legButtons = $('leg').children;
+  legButtons[1].disabled = !(d && d.hasUpstream);
+  if (d && !d.hasUpstream && S.leg === 1) S.leg = 0;
+  for (const [i, b] of [...legButtons].entries()) b.classList.toggle('on', i === S.leg);
+  for (const [i, b] of [...$('view').children].entries()) b.classList.toggle('on', i === S.view);
+  if (!d) return;
+
+  const up = S.leg === 1;
+  const key = S.view === 0 ? 'core' : 'raw';
+  $('req-title').textContent = up ? 'Request → 上游' : 'Request ← 客户端';
+  $('res-title').textContent = up ? 'Response ← 上游' : 'Response → 客户端';
+  $('req-body').textContent = (up ? d.upstreamRequest : d.clientRequest)[key];
+  $('res-body').textContent = (up ? d.upstreamResponse : d.clientResponse)[key];
+}
+
+/* ---------- 服务状态 ---------- */
+async function refreshStatus() {
+  try {
+    const s = await api('/api/status');
+    $('dot').classList.add('up');
+    $('state').textContent = `运行中 (pid ${s.pid})`;
+    $('cred').textContent = s.creds.map(c => {
+      if (!c.logged_in) return `${c.provider} ✗`;
+      const plan = c.plan && c.plan !== '-' ? ` ${c.plan}` : '';
+      const left = c.expires_in === 0
+        ? ' 已过期'
+        : ` ${Math.floor(c.expires_in / 60)}m${c.expires_in % 60}s`;
+      return `${c.provider} ✓${plan}${left}`;
+    }).join('    ');
+    $('btn-stop').disabled = false;
+  } catch (e) {
+    $('dot').classList.remove('up');
+    $('state').textContent = '连不上代理';
+    $('cred').textContent = e.message;
+    $('btn-stop').disabled = true;
+  }
+}
+
+/* ---------- Console ---------- */
+/** 面板与按钮亮起状态同步 -> 按钮本身就是「面板开着」的指示灯。 */
+function setConsole(open) {
+  $('console').classList.toggle('open', open);
+  $('btn-console').classList.toggle('active', open);
+}
+
+function log(text) {
+  const out = $('out');
+  out.textContent += (out.textContent ? '\n' : '') + text;
+  out.scrollTop = out.scrollHeight;
+  setConsole(true);
+}
+
+async function runCommand(cmd) {
+  if (cmd === 'clear') { $('out').textContent = ''; return; }
+  if (cmd === 'status') {
+    try {
+      const s = await api('/api/status');
+      const lines = [`运行中 (pid ${s.pid})`];
+      for (const e of s.endpoints) lines.push(`- ${e.surface.padEnd(13)} http://127.0.0.1:${e.port}`);
+      lines.push(`- ${'web-ui'.padEnd(13)} http://127.0.0.1:${s.ui_port}`);
+      if (s.lan_ip) lines.push(`  局域网同端口: http://${s.lan_ip} (无鉴权, 仅限可信内网)`);
+      lines.push(`日志: ${s.daemon_log}`);
+      lines.push(`往返记录: ${s.record_dir} (按天分文件, 不自动清理)`);
+      lines.push(`store: ${s.auth_path}`);
+      for (const c of s.creds) {
+        if (!c.logged_in) { lines.push(`- ${c.provider}: 未登录`); continue; }
+        const state = c.expires_in === 0
+          ? '已过期(下次请求自动刷新)'
+          : `${Math.floor(c.expires_in / 60)}m ${c.expires_in % 60}s 后到期`;
+        lines.push(`- ${c.provider}: ${c.account || '-'} | plan=${c.plan || '-'} | ${state}`);
+      }
+      log(lines.join('\n'));
+      refreshStatus();
+    } catch (e) { log(`status 失败: ${e.message}`); }
+    return;
+  }
+  if (cmd === 'models') {
+    log('models…');
+    try {
+      const r = await api('/api/models');
+      const lines = [];
+      for (const p of r.providers) {
+        lines.push(`${p.provider} (端口 ${p.ports})`);
+        if (!p.logged_in) { lines.push(`  未登录 (\`jj-agentic-proxy login ${p.provider}\`)`); continue; }
+        if (!p.models.length) lines.push('  取不到列表 (上游异常或凭证失效)');
+        for (const m of p.models) lines.push(`  ${m}`);
+      }
+      log(lines.join('\n'));
+    } catch (e) { log(`models 失败: ${e.message}`); }
+    return;
+  }
+  if (cmd.startsWith('login:')) {
+    const provider = cmd.slice(6);
+    log(`login ${provider}…`);
+    try {
+      await api(`/api/login/${provider}`, { method: 'POST' });
+      pollLogin();
+    } catch (e) { log(`login 失败: ${e.message}`); }
+    return;
+  }
+  if (cmd.startsWith('logout:')) {
+    const provider = cmd.slice(7);
+    if (!confirm(`删除 ${provider} 的本地凭证?`)) return;
+    try {
+      const r = await api(`/api/logout/${provider}`, { method: 'POST' });
+      log(r.messages.join('\n'));
+      refreshStatus();
+    } catch (e) { log(`logout 失败: ${e.message}`); }
+    return;
+  }
+  if (cmd === 'stop') {
+    if (!confirm('停止代理? 重新启动需要在终端执行 `jj-agentic-proxy start`')) return;
+    try {
+      const r = await api('/api/stop', { method: 'POST' });
+      log(r.message);
+      setTimeout(refreshStatus, 800);
+    } catch (e) { log(`stop 失败: ${e.message}`); }
+  }
+}
+
+/** 登录是本机浏览器里的一次跳转 -> 页面只跟进度, 不参与授权。 */
+function pollLogin() {
+  if (S.loginTimer) return;
+  let lastUrl = '';
+  let lastMessage = '';
+  S.loginTimer = setInterval(async () => {
+    let s;
+    try { s = await api('/api/login'); } catch { return; }
+    if (s.url && s.url !== lastUrl) {
+      lastUrl = s.url;
+      log(`授权链接 (已在本机浏览器打开; 从别的机器看到这条就把它复制到跑代理那台机器上打开):\n${s.url}`);
+    }
+    if (s.message && s.message !== lastMessage) {
+      lastMessage = s.message;
+      log(s.message);
+    }
+    if (s.state !== 'waiting') {
+      clearInterval(S.loginTimer);
+      S.loginTimer = null;
+      refreshStatus();
+    }
+  }, 1000);
+}
+
+/* ---------- 分隔条 ---------- */
+function draggable(grip, onMove) {
+  grip.addEventListener('mousedown', down => {
+    down.preventDefault();
+    const move = e => onMove(e);
+    const up = () => {
+      document.removeEventListener('mousemove', move);
+      document.removeEventListener('mouseup', up);
+      document.body.style.cursor = '';
+    };
+    document.body.style.cursor = getComputedStyle(grip).cursor;
+    document.addEventListener('mousemove', move);
+    document.addEventListener('mouseup', up);
+  });
+}
+
+draggable($('vgrip'), e => {
+  const box = $('main').getBoundingClientRect();
+  const pct = ((e.clientX - box.left) / box.width) * 100;
+  $('list').style.flexBasis = `${Math.min(85, Math.max(20, pct))}%`;
+});
+
+draggable($('hgrip'), e => {
+  const box = $('panes').getBoundingClientRect();
+  const pct = ((e.clientY - box.top) / box.height) * 100;
+  document.querySelector('.pane.req').style.flexBasis = `${Math.min(88, Math.max(12, pct))}%`;
+});
+
+/* ---------- 事件绑定 ---------- */
+$('q').addEventListener('input', applyFilter);
+$('days').addEventListener('change', e => { S.selectedSeq = null; reloadDays(e.target.value); });
+$('follow').addEventListener('change', e => { if (e.target.checked) tick(); });
+
+$('rows').addEventListener('click', e => {
+  const tr = e.target.closest('tr');
+  if (!tr) return;
+  const idx = [...$('rows').children].indexOf(tr);
+  if (idx >= 0) select(idx);
+});
+
+$('leg').addEventListener('click', e => {
+  const b = e.target.closest('button');
+  if (!b || b.disabled) return;
+  S.leg = Number(b.dataset.i);
+  renderDetail();
+});
+
+$('view').addEventListener('click', e => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  S.view = Number(b.dataset.i);
+  renderDetail();
+});
+
+for (const b of document.querySelectorAll('[data-copy]')) {
+  b.addEventListener('click', async () => {
+    const text = $(`${b.dataset.copy}-body`).textContent;
+    if (!text) return;
+    const done = () => { b.textContent = 'Copied'; setTimeout(() => { b.textContent = 'Copy'; }, 1200); };
+    try {
+      // clipboard API 只在 secure context 可用: 127.0.0.1 / localhost 算, 局域网 IP 不算
+      await navigator.clipboard.writeText(text);
+      done();
+    } catch {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand('copy');
+      ta.remove();
+      if (ok) done();
+      else b.textContent = '手动选中复制';
+    }
+  });
+}
+
+$('btn-console').addEventListener('click', () => setConsole(!$('console').classList.contains('open')));
+$('btn-stop').addEventListener('click', () => runCommand('stop'));
+for (const b of document.querySelectorAll('[data-cmd]')) {
+  b.addEventListener('click', () => runCommand(b.dataset.cmd));
+}
+
+document.addEventListener('keydown', e => {
+  const mod = e.metaKey || e.ctrlKey;
+  if (mod && e.key.toLowerCase() === 'd') {
+    e.preventDefault();
+    S.view = S.view === 0 ? 1 : 0;
+    renderDetail();
+    return;
+  }
+  if (mod && e.key.toLowerCase() === 'f') {
+    e.preventDefault();
+    $('q').focus();
+    $('q').select();
+    return;
+  }
+  if (e.target === $('q') || e.target.tagName === 'SELECT' || e.target.tagName === 'INPUT') return;
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    const cur = S.rows.findIndex(r => r.seq === S.selectedSeq);
+    const next = e.key === 'ArrowDown' ? cur + 1 : cur - 1;
+    if (next >= 0 && next < S.rows.length) select(next);
+  }
+});
+
+/* ---------- follow ---------- */
+async function tick() {
+  if (!$('follow').checked) return;
+  // 跨零点: 新的一天是新文件, 自动跟到最新
+  try {
+    const days = (await api('/api/days')).days || [];
+    if (days.length && days[0] !== S.day) {
+      S.selectedSeq = null;
+      await reloadDays(days[0]);
+      return;
+    }
+  } catch { /* 目录暂时读不到: 下一拍再试 */ }
+  await scan(false);
+}
+
+setInterval(tick, FOLLOW_MS);
+setInterval(refreshStatus, 15000);
+reloadDays(null);
+refreshStatus();
+log([
+  '上面的按钮把命令跑在「跑着代理的那台机器」上, 输出显示在这里。',
+  'Login 的授权回调端口写死在上游 allow-list -> 浏览器只会开在那台机器上。',
+  'Start 只能在终端执行: 这个页面由代理进程本身提供, 进程没起来时页面也不存在。',
+].join('\n'));
+</script>
+</body>
+</html>

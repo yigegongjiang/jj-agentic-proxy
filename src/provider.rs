@@ -20,6 +20,10 @@ pub const BIND_WILDCARDS: [&str; 2] = ["::", "0.0.0.0"];
 /// 打印 base url 用的本机地址 (局域网客户端换成本机 LAN IP)。
 pub const HOST: &str = "127.0.0.1";
 
+/// Web 查看器端口。刻意不进 `Surface`: 它不是协议面, 没有上游与凭证映射,
+/// 混进去会让透传 / 模型列表 / 错误信封到处长出「这个面不是代理」的分支。
+pub const UI_PORT: u16 = 10020;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Provider {
     Anthropic,

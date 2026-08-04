@@ -8,20 +8,21 @@
 
 # jj-agentic-proxy
 
-本机 agentic proxy: 复用自有订阅 (Claude Pro / ChatGPT Plus), 经 Web OAuth 取 token, 以官方 CLI 身份把 Codex 能力暴露在 `:10010`、Claude Code 能力暴露在 `:10011` (原生 Anthropic) 与 `:10012` (Anthropic 官方 OpenAI 兼容层); 三端口监听全部网卡 -> 本机与同局域网主机都能连; 经手的 req/res 全量落本机文本日志, 配套 macOS app 做绑定查看.
+本机 agentic proxy: 复用自有订阅 (Claude Pro / ChatGPT Plus), 经 Web OAuth 取 token, 以官方 CLI 身份把 Codex 能力暴露在 `:10010`、Claude Code 能力暴露在 `:10011` (原生 Anthropic) 与 `:10012` (Anthropic 官方 OpenAI 兼容层); 全部端口监听全部网卡 -> 本机与同局域网主机都能连; 经手的 req/res 全量落本机文本日志, 配套查看器两份 (`:10020` 浏览器 + macOS app) 做绑定查看.
 
 ## 安装
 
 - macOS only; 无预编译分发, 本机构建后装入 `~/.local/bin/jj-agentic-proxy` (见 [workflow.md](./workflow.md))
 - `~/.local/bin` 需在 `PATH`: `export PATH="$HOME/.local/bin:$PATH"`
-- 查看器 app 装入 `/Applications/jj-agentic-proxy.app` (同一份 [workflow.md](./workflow.md))
+- 浏览器查看器无需安装: 随代理进程一起起来, 开 `http://127.0.0.1:10020`
+- macOS 查看器 app 装入 `/Applications/jj-agentic-proxy.app` (同一份 [workflow.md](./workflow.md))
 
 ## 使用
 
 ```bash
 jj-agentic-proxy login anthropic  # 浏览器授权; token 落 ~/.config/jj-agentic-proxy/auth.json (0600)
 jj-agentic-proxy login codex      # 同上
-jj-agentic-proxy                  # = start, 后台常驻 (10010 + 10011 + 10012); 已在运行则先停再起
+jj-agentic-proxy                  # = start, 后台常驻 (10010 + 10011 + 10012 + 10020); 已在运行则先停再起
 jj-agentic-proxy stop             # 停止
 jj-agentic-proxy status           # 运行中/未运行 + 凭证账号 / 套餐 / 到期
 jj-agentic-proxy models           # 两家订阅当前可用 model + 各自端口
@@ -42,10 +43,12 @@ jj-agentic-proxy logout all       # anthropic | codex | all
 | 10010 | codex | ChatGPT | `chatgpt.com/backend-api/codex` | OpenAI Responses + Chat Completions (本地转换) |
 | 10011 | claude-code | Claude | `api.anthropic.com/v1/messages` | Anthropic Messages + Chat Completions (本地转换) |
 | 10012 | claude-openai | Claude | `api.anthropic.com/v1/chat/completions` | OpenAI Chat Completions (上游官方兼容层) |
+| 10020 | web-ui | — | — | 浏览器查看器 (非协议面, 不代理任何请求) |
 
 - 端口写死在二进制里, 无任何 host / port 参数: base url 一次写死, 换机器不用改
 - 监听 v4 + v6 全网卡: 本机用 `127.0.0.1` / `localhost`, 局域网其他主机用本机 LAN IP (同端口); `start` / `status` 直接打印该 LAN 入口
-- 无鉴权 -> 能连到这三个端口的主机即可用本机订阅; 仅限可信内网, 端口 MUST NOT 经路由器映射到公网
+- 四个端口一起 bind 且早于就绪标记: 任一被占即整体启动失败, 不留「代理能用但看不见流量」的半残状态
+- 无鉴权 -> 能连到这些端口的主机即可用本机订阅、读全部往返记录 (含原样授权头); 仅限可信内网, 端口 MUST NOT 经路由器映射到公网
 - macOS 应用防火墙开着时首次启动会弹「是否允许接受传入网络连接」, 选允许; 静默拒绝会表现为局域网连不上而本机正常
 - 10011 与 10012 同一份 Claude 订阅凭证, 只是协议转换发生在本地还是上游
 - 请求打到哪个端口就走哪家订阅, 与 model 名无关; 路径走错端口时 404 直接给出正确端口
@@ -99,9 +102,9 @@ jj-agentic-proxy logout all       # anthropic | codex | all
 - 不记 `/health` (本机探活, 无上游往返); 上游响应体不单独记 (透传面与客户端那份相同)
 - 流式响应逐块 tee 落盘, 不缓冲转发 -> 记录不影响 SSE 首字延迟
 
-## 查看器 app
+## 查看器 (浏览器 + macOS app 两份)
 
-`app/` = macOS AppKit app (SwiftPM, 零第三方依赖), 唯一职责是把上面的记录读给人看; 代理能力一概不实现:
+唯一职责是把上面的记录读给人看, 代理能力一概不实现. 两份业务功能对齐, 读同一份 `.jsonl`, 同一套视图与排版:
 
 - 左列表 (新 -> 旧) + 右上下面板: 选中一条即绑定展示它的 Request / Response
 - 两组切换互不干扰: `Client ↔ Proxy` / `Proxy ↔ Upstream` 选哪条腿, `核心内容` / `原始报文` 选哪种读法 (⌘D)
@@ -109,8 +112,13 @@ jj-agentic-proxy logout all       # anthropic | codex | all
 - 原始报文: 起始行 + header (按名排序) + 空行 + body; JSON 缩进展示 (对象键按字典序, 数组保持线上原序), SSE / 文本原样
 - 每面板可 Copy (复制当前视图的文本)
 - 顶栏 Follow 自动读入新记录 (选中行不跳走), 日期下拉切换历史, 过滤框按 path / model / status / surface 多词 AND
-- 服务状态与 Start / Stop / Login / Logout 全部转调 CLI (`Console…` 面板实时回显输出), app 不复刻任何判断
-- 数据只读: 记录由 CLI 写, app 从不写回
+- 数据只读: 记录由代理写, 查看器从不写回
+
+差异只在服务操作上:
+
+- 浏览器版 (`:10020`): 操作直接调进程内的同一套实现, 不 exec CLI; `Console` 面板跑 Status / Models / Login / Logout / Stop 并回显。**`start` 例外** —— 页面由代理进程本身提供, 进程没起来时页面也不存在, 只能在终端执行
+- macOS app (`app/`, SwiftPM + AppKit, 零第三方依赖): 全部转调 CLI 子进程 (`Console…` 面板实时回显), 因此 Start 也能点; app 不复刻任何判断
+- Login 的授权回调端口写死在上游 client_id allow-list -> 浏览器只会开在跑着代理的那台机器上, 与从哪台机器点的无关
 
 ### 核心内容视图
 
@@ -126,8 +134,11 @@ SSE 原文是几百帧被切碎的 `event:` / `data:`, 人读不了 -> 先重建
 
 ## 架构
 
-- 单进程 axum, 三端口共用凭证与连接池; 建连超时 20s / 读取空闲超时 300s; 直连上游无云端中转; req/res 只落本机日志目录
-- 启动时先 bind 三个端口再对外服务: 端口被占用立刻整体失败, 不留「只有一部分能用」的中间态
+- 单进程 axum, 三个协议面共用凭证与连接池; 建连超时 20s / 读取空闲超时 300s; 直连上游无云端中转; req/res 只落本机日志目录
+- 启动时先 bind 全部端口 (三协议面 + 查看器) 再对外服务: 任一被占立刻整体失败, 不留「只有一部分能用」的中间态
+- 查看器端口不进协议面枚举: 它没有上游与凭证映射, 混进去会让透传 / 模型列表 / 错误信封处处长出「这个面不是代理」的分支
+- 查看器的文件读取走 `spawn_blocking`: 单日记录可以是 GB 级 (body 全量且永不清理), 同步读会阻塞 runtime 拖累 SSE 首字延迟
+- 查看器只吐摘要行与整行原文, 语义渲染 (SSE 重建 / 三方言归一) 在浏览器里做 -> 代理侧零解析负担
 - 每个端口绑 `127.0.0.1` + 通配面 (`::` 优先, dual-stack 关掉时才用得上 `0.0.0.0`): loopback 绑不上即判定端口被占并整体失败 (语义与只监听本机时一致), 通配面失败只降级为「局域网连不上」并记 warn; BSD 按最具体地址派发, 两类 socket 并存不冲突
 - 单实例: `daemon.pid` 独占文件锁, 锁由内核在进程退出时释放 -> 判活不受 pid 复用 / 残留 pid 文件影响
 - `start` 拉起后台进程后等它写下就绪标记才报成功 (不靠「端口通」, 避免把别人占的端口认成自己); `stop` = SIGTERM -> 等锁释放 -> 5s 未退则 SIGKILL
@@ -149,7 +160,7 @@ SSE 原文是几百帧被切碎的 `event:` / `data:`, 人读不了 -> 先重建
 ## 结构
 
 ```
-src/main.rs               CLI (start / stop / login / logout / status / models / logs) + 三个固定端口 + 优雅退出
+src/main.rs               CLI (start / stop / login / logout / status / models / logs) + 四个固定端口 + 优雅退出
 src/daemon.rs             后台常驻: 单实例锁 + 探活 + 启停 + 日志封顶
 src/reqlog.rs             往返记录: 一行一次 req/res + 按天分文件 (不清理) + logs 摘要
 src/server.rs             端口层: Chat Completions + 模型列表 + 往返记录挂点, 其余落透传
@@ -162,9 +173,11 @@ src/auth.rs               凭证内存态 + 到期预判 + 单飞刷新
 src/oauth.rs              PKCE + 本机回调服务 + 两家 token 换取/刷新
 src/provider.rs           协议面 <-> 端口 / 订阅映射 + 两家上游常量 (client_id / endpoint / CLI 冒充参数)
 src/store.rs              auth.json 读写 (原子 + 0600)
+src/webui.rs              浏览器查看器后端: 只读接口 (日期 / 增量索引 / 整行原文) + 状态 + 服务操作
+src/webui/app.html        浏览器查看器前端: 单文件 (include_str! 进二进制), 零外部资源
 scripts/install-local.sh  预部署总入口: CLI release 构建 + 安装 -> 续跑 app/package.sh (`--cli-only` 只装 CLI)
 
-app/Package.swift         查看器 app: SwiftPM executable (macOS 13+, AppKit)
+app/Package.swift         macOS 查看器 app: SwiftPM executable (macOS 13+, AppKit)
 app/package.sh            Release 构建 + 组装 .app + ad-hoc 签名 + 装 /Applications (版本取自 Cargo.toml; 被 install-local.sh 调用)
 app/Resources/            bundle 模板 (Info.plist.in, `@VERSION@` 占位)
 app/Sources/jj-agentic-proxy/
