@@ -7,7 +7,17 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-/// 只监听 loopback: 代理持有个人订阅凭证, 不对外暴露。
+/// loopback 面: 必须绑到, 绑不上即判定端口被占。
+pub const BIND_LOOPBACK: &str = "127.0.0.1";
+
+/// 通配面: 让同局域网的其他主机能用本机 LAN IP 连 (best-effort)。
+///
+/// `::` 在先 — macOS 默认 dual-stack, 一个 socket 就覆盖 v4 与 v6;
+/// dual-stack 被关掉时才轮到 `0.0.0.0` 补上 v4。BSD 按最具体地址派发,
+/// 通配面与上面的 loopback socket 并存不冲突。
+pub const BIND_WILDCARDS: [&str; 2] = ["::", "0.0.0.0"];
+
+/// 打印 base url 用的本机地址 (局域网客户端换成本机 LAN IP)。
 pub const HOST: &str = "127.0.0.1";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]

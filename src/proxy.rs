@@ -340,11 +340,8 @@ fn not_found_hint(surface: Surface, path: &str) -> String {
         .into_iter()
         .find(|&s| s != surface && resolve(s, path, None).is_some());
     match other {
-        Some(s) => format!(
-            "路径 {path} 属于 {s}, 请改用 http://{}:{}",
-            provider::HOST,
-            s.port()
-        ),
+        // 只给端口不给 host: 客户端可能从局域网另一台机器打进来, 写死 127.0.0.1 会误导。
+        Some(s) => format!("路径 {path} 属于 {s}, 请改用端口 {}", s.port()),
         None => format!(
             "未支持的路径 {path}; {surface} 端口 ({}) 可用: {}",
             surface.port(),
@@ -862,14 +859,14 @@ mod tests {
     fn wrong_port_hint_points_at_the_right_one() {
         let hint = not_found_hint(Surface::ClaudeCode, "/v1/responses");
         assert!(hint.contains("codex"), "{hint}");
-        assert!(hint.contains("127.0.0.1:10010"), "{hint}");
+        assert!(hint.contains("10010"), "{hint}");
 
         let hint = not_found_hint(Surface::Codex, "/v1/messages");
-        assert!(hint.contains("127.0.0.1:10011"), "{hint}");
+        assert!(hint.contains("10011"), "{hint}");
 
         // 原生 Messages 打到兼容层端口 -> 指回 10011
         let hint = not_found_hint(Surface::ClaudeOpenAI, "/v1/messages");
-        assert!(hint.contains("127.0.0.1:10011"), "{hint}");
+        assert!(hint.contains("10011"), "{hint}");
 
         // 谁都不认的路径 -> 列本端口可用路径
         let hint = not_found_hint(Surface::Codex, "/embeddings");

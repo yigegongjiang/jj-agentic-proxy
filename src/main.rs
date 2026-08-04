@@ -109,24 +109,25 @@ async fn serve() -> Result<()> {
     }
 
     let mut tasks = Vec::new();
-    for (s, listener) in bound {
-        tracing::info!(
-            "{s:<13} listening on http://{}:{}",
-            provider::HOST,
-            s.port()
-        );
-        let port = proxy::Port {
-            app: app.clone(),
-            surface: s,
-        };
-        tasks.push((
-            s,
-            tokio::spawn(
-                axum::serve(listener, server::router(port))
-                    .with_graceful_shutdown(shutdown())
-                    .into_future(),
-            ),
-        ));
+    for (s, listeners) in bound {
+        for listener in listeners {
+            match listener.local_addr() {
+                Ok(addr) => tracing::info!("{s:<13} listening on http://{addr}"),
+                Err(e) => tracing::warn!("{s:<13} 取监听地址失败: {e}"),
+            }
+            let port = proxy::Port {
+                app: app.clone(),
+                surface: s,
+            };
+            tasks.push((
+                s,
+                tokio::spawn(
+                    axum::serve(listener, server::router(port))
+                        .with_graceful_shutdown(shutdown())
+                        .into_future(),
+                ),
+            ));
+        }
     }
 
     daemon::mark_ready(&mut instance)?;
@@ -157,15 +158,46 @@ fn init_tracing() -> Result<()> {
     Ok(())
 }
 
-async fn bind(port: u16) -> Result<tokio::net::TcpListener> {
-    tokio::net::TcpListener::bind((provider::HOST, port))
+/// loopback 面绑不上 = 端口被占, 直接失败; 通配面 (局域网入口) 尽力而为。
+async fn bind(port: u16) -> Result<Vec<tokio::net::TcpListener>> {
+    let loopback = tokio::net::TcpListener::bind((provider::BIND_LOOPBACK, port))
         .await
         .with_context(|| {
             format!(
                 "监听 {}:{port} 失败 (端口固定, 需先释放占用)",
-                provider::HOST
+                provider::BIND_LOOPBACK
             )
-        })
+        })?;
+    let mut listeners = vec![loopback];
+    for host in provider::BIND_WILDCARDS {
+        match tokio::net::TcpListener::bind((host, port)).await {
+            Ok(l) => listeners.push(l),
+            // dual-stack 下 `0.0.0.0` 必然与 `::` 重复 -> 失败是预期, 不是故障。
+            Err(e) => tracing::debug!("{host}:{port} 未绑定: {e}"),
+        }
+    }
+    if listeners.len() == 1 {
+        tracing::warn!("{port} 只绑到 loopback, 局域网主机连不上");
+    }
+    Ok(listeners)
+}
+
+/// 本机在局域网里的地址: UDP connect 只查路由不发包, 无网络往返也能拿到出口网卡 IP。
+fn lan_ip() -> Option<std::net::IpAddr> {
+    let sock = std::net::UdpSocket::bind(("0.0.0.0", 0)).ok()?;
+    sock.connect(("8.8.8.8", 80)).ok()?;
+    let ip = sock.local_addr().ok()?.ip();
+    (!ip.is_loopback() && !ip.is_unspecified()).then_some(ip)
+}
+
+/// 三个端口的 base url + 局域网入口 (start / status 共用)。
+pub(crate) fn print_endpoints() {
+    for s in Surface::ALL {
+        println!("- {s:<13} http://{}:{}", provider::HOST, s.port());
+    }
+    if let Some(ip) = lan_ip() {
+        println!("  局域网同端口: http://{ip} (无鉴权, 仅限可信内网)");
+    }
 }
 
 async fn login(name: &str) -> Result<()> {
@@ -200,9 +232,7 @@ fn status() -> Result<()> {
     match daemon::running()? {
         Some(pid) => {
             println!("运行中 (pid {pid})");
-            for s in Surface::ALL {
-                println!("- {s:<13} http://{}:{}", provider::HOST, s.port());
-            }
+            print_endpoints();
             println!("日志: {}", daemon::log_path().display());
         }
         None => println!("未运行 (`jj-agentic-proxy start` 后台启动)"),
@@ -404,6 +434,27 @@ mod tests {
     fn oversized_number_does_not_panic() {
         let huge = "m-".to_string() + &"9".repeat(60);
         assert_ne!(super::natural_cmp(&huge, "m-1"), std::cmp::Ordering::Less);
+    }
+
+    /// 局域网入口是需求本身: 只剩 loopback 就等于其他主机连不上。
+    #[tokio::test]
+    async fn bind_covers_loopback_and_wildcard() {
+        let addrs: Vec<_> = super::bind(19011)
+            .await
+            .unwrap()
+            .iter()
+            .map(|l| l.local_addr().unwrap().ip())
+            .collect();
+        assert!(addrs.iter().any(|ip| ip.is_loopback()), "{addrs:?}");
+        assert!(addrs.iter().any(|ip| ip.is_unspecified()), "{addrs:?}");
+    }
+
+    #[tokio::test]
+    async fn occupied_loopback_still_fails_the_whole_bind() {
+        let _held = tokio::net::TcpListener::bind(("127.0.0.1", 19012))
+            .await
+            .unwrap();
+        assert!(super::bind(19012).await.is_err());
     }
 
     #[test]

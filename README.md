@@ -8,7 +8,7 @@
 
 # jj-agentic-proxy
 
-本机 agentic proxy: 复用自有订阅 (Claude Pro / ChatGPT Plus), 经 Web OAuth 取 token, 以官方 CLI 身份把 Codex 能力暴露在 `127.0.0.1:10010`、Claude Code 能力暴露在 `127.0.0.1:10011` (原生 Anthropic) 与 `127.0.0.1:10012` (Anthropic 官方 OpenAI 兼容层); 经手的 req/res 全量落本机文本日志, 配套 macOS app 做绑定查看.
+本机 agentic proxy: 复用自有订阅 (Claude Pro / ChatGPT Plus), 经 Web OAuth 取 token, 以官方 CLI 身份把 Codex 能力暴露在 `:10010`、Claude Code 能力暴露在 `:10011` (原生 Anthropic) 与 `:10012` (Anthropic 官方 OpenAI 兼容层); 三端口监听全部网卡 -> 本机与同局域网主机都能连; 经手的 req/res 全量落本机文本日志, 配套 macOS app 做绑定查看.
 
 ## 安装
 
@@ -44,9 +44,12 @@ jj-agentic-proxy logout all       # anthropic | codex | all
 | 10012 | claude-openai | Claude | `api.anthropic.com/v1/chat/completions` | OpenAI Chat Completions (上游官方兼容层) |
 
 - 端口写死在二进制里, 无任何 host / port 参数: base url 一次写死, 换机器不用改
+- 监听 v4 + v6 全网卡: 本机用 `127.0.0.1` / `localhost`, 局域网其他主机用本机 LAN IP (同端口); `start` / `status` 直接打印该 LAN 入口
+- 无鉴权 -> 能连到这三个端口的主机即可用本机订阅; 仅限可信内网, 端口 MUST NOT 经路由器映射到公网
+- macOS 应用防火墙开着时首次启动会弹「是否允许接受传入网络连接」, 选允许; 静默拒绝会表现为局域网连不上而本机正常
 - 10011 与 10012 同一份 Claude 订阅凭证, 只是协议转换发生在本地还是上游
 - 请求打到哪个端口就走哪家订阅, 与 model 名无关; 路径走错端口时 404 直接给出正确端口
-- base url 两家官方写法都通: `http://127.0.0.1:10011` (Anthropic SDK 约定) 与 `http://127.0.0.1:10011/v1` (OpenAI SDK 约定)
+- base url 两家官方写法都通: `http://<host>:10011` (Anthropic SDK 约定) 与 `http://<host>:10011/v1` (OpenAI SDK 约定)
 - api key 填任意非空值即可 (官方 SDK 会本地校验非空); 代理不校验它, 上游身份一律用本机 OAuth 凭证
 - 全放开 CORS: 浏览器页面可直连, 预检由代理直接应答
 
@@ -123,8 +126,9 @@ SSE 原文是几百帧被切碎的 `event:` / `data:`, 人读不了 -> 先重建
 
 ## 架构
 
-- 单进程 axum, 三端口共用凭证与连接池; 建连超时 20s / 读取空闲超时 300s; 只监听 loopback, 无云端中转; req/res 只落本机日志目录
+- 单进程 axum, 三端口共用凭证与连接池; 建连超时 20s / 读取空闲超时 300s; 直连上游无云端中转; req/res 只落本机日志目录
 - 启动时先 bind 三个端口再对外服务: 端口被占用立刻整体失败, 不留「只有一部分能用」的中间态
+- 每个端口绑 `127.0.0.1` + 通配面 (`::` 优先, dual-stack 关掉时才用得上 `0.0.0.0`): loopback 绑不上即判定端口被占并整体失败 (语义与只监听本机时一致), 通配面失败只降级为「局域网连不上」并记 warn; BSD 按最具体地址派发, 两类 socket 并存不冲突
 - 单实例: `daemon.pid` 独占文件锁, 锁由内核在进程退出时释放 -> 判活不受 pid 复用 / 残留 pid 文件影响
 - `start` 拉起后台进程后等它写下就绪标记才报成功 (不靠「端口通」, 避免把别人占的端口认成自己); `stop` = SIGTERM -> 等锁释放 -> 5s 未退则 SIGKILL
 - 后台日志单文件 8MB 上限, 满则轮转一份 -> 磁盘占用恒定, 不随运行时长增长

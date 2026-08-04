@@ -13,7 +13,6 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 
-use crate::provider::{self, Surface};
 use crate::store::config_dir;
 
 /// 后台模式的日志目标; 由 `start` 传给子进程。
@@ -115,9 +114,7 @@ pub fn start() -> Result<()> {
     }
 
     println!("已启动 (pid {})", child.id());
-    for s in Surface::ALL {
-        println!("- {s:<13} http://{}:{}", provider::HOST, s.port());
-    }
+    crate::print_endpoints();
     println!("日志 {}", log.display());
     Ok(())
 }
