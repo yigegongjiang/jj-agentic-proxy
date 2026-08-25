@@ -14,6 +14,17 @@
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-08-25
+
+### Fixed
+
+- Apple Silicon 装完后系统弹「Support Ending for Intel-based Apps」: 安装包不再把 Intel 与 Apple Silicon 代码合在一起, 改为按架构各发一份 -> 机器上的包体内不再有另一架构的代码
+- 安装器在 `/Applications` 不可写时会把人引向 `sudo`, 照做终端命令会建到 root 名下、当前账号反而找不到; 改为提示换管理员账号重跑
+
+### Changed
+
+- 一条命令安装会自己认架构下载对应包 (在 Rosetta 终端里也认得出真实架构); 手动下载需按自己机器选 `arm64` 或 `x86_64` 那份
+
 ## [0.12.0] - 2026-08-25
 
 ### Added

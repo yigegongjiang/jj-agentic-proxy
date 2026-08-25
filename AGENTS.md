@@ -5,7 +5,8 @@
 
 ## 指令路由（MUST）
 
-- 【MUST】代码 / 架构 / 命令 / 结构 → [README.md](./README.md)
+- 【MUST】安装 / 上手 / 端口 · 接入 → [README.md](./README.md)（对外, 读者 = 陌生开发者）
+- 【MUST】代码 / 架构 / 协议细节 / 记录格式 / 结构 → [ARCHITECTURE.md](./ARCHITECTURE.md)
 - 【MUST】版本 / changelog / git commit+push / 预部署+发布 → [workflow.md](./workflow.md)
 
 ## 工作模式 (MUST、AI-only)
@@ -24,7 +25,7 @@
 
 ## 文档编写规范
 
-- 全部文档只供 AI 查看，MUST 简洁精炼, 零冗余; MUST NOT 废话填充
+- README.md 对外 (读者 = 陌生开发者), 其余文档只供 AI 查看; 一律 MUST 简洁精炼, 零冗余; MUST NOT 废话填充
 - 能一行不写两行, 能一个单词不写两个单词, 能列表不写段落; 短句; `->` `/` `+` 替连接词
 - 强度词: MUST / MUST NOT / SHOULD / MAY / NEVER
 - 单一信源: 跨文档用 link 引用, MUST NOT 复述事实

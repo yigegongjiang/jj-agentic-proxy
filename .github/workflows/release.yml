@@ -1,4 +1,4 @@
-# 打 tag 即发版: universal 构建 -> tar.gz / dmg / install.sh / SHA256SUMS 传到 GitHub Release。
+# 打 tag 即发版: arm64 / x86_64 各构建一套 -> tar.gz / dmg / install.sh / SHA256SUMS 传到 GitHub Release。
 # 打包逻辑全在 scripts/make-dist.sh, 这里只做环境准备与上传 -> 本机跑同一脚本即可复现。
 # workflow_dispatch 是干跑: 走完整打包但不建 release, 产物留在 workflow artifact。
 name: release
@@ -65,7 +65,7 @@ jobs:
       - name: 上传 workflow artifact
         uses: actions/upload-artifact@v7
         with:
-          name: macos-universal
+          name: macos-dist
           path: dist/
           retention-days: 14
 
