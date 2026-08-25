@@ -14,12 +14,17 @@
 
 ## 安装
 
-- macOS only; 无预编译分发, 本机构建后装入 `/Applications/jj-agentic-proxy.app` (见 [workflow.md](./workflow.md))
-- CLI 二进制在 app 包体内 (`Contents/MacOS/jj-agentic-proxy-cli`); `~/.local/bin/jj-agentic-proxy` 只是指过去的 symlink -> 升级只装 app, CLI 与 app 永不版本错位
+macOS 13+, Apple Silicon / Intel 通用二进制。一条命令装最新版 (升级 = 重跑同一条):
+
+```bash
+curl -fsSL https://github.com/yigegongjiang/jj-agentic-proxy/releases/latest/download/install.sh | bash
+```
+
+- 手动装: [Releases](https://github.com/yigegongjiang/jj-agentic-proxy/releases/latest) 取 `.tar.gz` 解压 / `.dmg` 挂载, 都跑里面的 `install.sh` (只有它会建终端命令的链接); 校验用同页 `SHA256SUMS` 对 `shasum -a 256`
+- 无 Apple 开发者签名 (ad-hoc): curl / tar 路径不带 quarantine 直接可跑; 浏览器下的 `.dmg` 会带, `install.sh` 装完就地摘掉 -> 全程不用去系统设置点「仍要打开」
+- 一个 bundle 三合一: CLI 在包体内 (`Contents/MacOS/jj-agentic-proxy-cli`), macOS 查看器 = 同 bundle 主程序 (双击即用), `~/.local/bin/jj-agentic-proxy` 只是指过去的 symlink -> 升级只装 app, 永不版本错位; 删掉 app 则 CLI 一起没了, 安装中途失败留断链 -> 重跑安装即恢复
 - `~/.local/bin` 需在 `PATH`: `export PATH="$HOME/.local/bin:$PATH"`
-- 只有一份副本: 删掉 app 则 CLI 一起没了; 安装中途失败会留断链 -> 重跑安装即恢复
 - 浏览器查看器无需安装: 随代理进程一起起来, 开 `http://127.0.0.1:10020`
-- macOS 查看器 = 同一个 bundle 的主程序, 双击 app 即用
 
 ## 使用
 
@@ -36,7 +41,7 @@ jj-agentic-proxy logout all       # anthropic | codex | all
 
 - 后台常驻: 脱离终端 (关掉 shell 不影响), 日志落 `~/.config/jj-agentic-proxy/daemon.log`
 - `models` 直接问上游, 与后台是否在跑无关; 内容同 `GET /v1/models`, 打印时按名字自然序重排 (端点仍保上游原序)
-- `start` = restart: 已在运行则先 stop 再起新进程 -> 升级 / 换版本后一条命令即生效, 永不出现两个实例
+- `start` = restart -> 升级 / 换版本后一条命令即生效, 永不出现两个实例
 - 被外部程序占了固定端口时 start 直接失败并回显日志尾部
 
 ## 端口 (一个端口一个协议面)
@@ -51,11 +56,9 @@ jj-agentic-proxy logout all       # anthropic | codex | all
 
 - 端口写死在二进制里, 无任何 host / port 参数: base url 一次写死, 换机器不用改
 - 监听 v4 + v6 全网卡: 本机用 `127.0.0.1` / `localhost`, 局域网其他主机用本机 LAN IP (同端口); `start` / `status` 直接打印该 LAN 入口
-- 四个端口一起 bind 且早于就绪标记: 任一被占即整体启动失败, 不留「代理能用但看不见流量」的半残状态
 - 无鉴权 -> 能连到这些端口的主机即可用本机订阅、读全部往返记录 (含原样授权头); 仅限可信内网, 端口 MUST NOT 经路由器映射到公网
 - macOS 应用防火墙开着时首次启动会弹「是否允许接受传入网络连接」, 选允许; 静默拒绝会表现为局域网连不上而本机正常 (二进制换到新路径后会再问一次, 比如首次改用 app 包体内那份)
-- 10011 与 10012 同一份 Claude 订阅凭证, 只是协议转换发生在本地还是上游
-- 请求打到哪个端口就走哪家订阅, 与 model 名无关; 路径走错端口时 404 直接给出正确端口
+- 请求打到哪个端口就走哪家订阅, 与 model 名无关 (10011 / 10012 共用同一份 Claude 凭证, 只是协议转换发生在本地还是上游); 路径走错端口时 404 直接给出正确端口
 - base url 带不带 `/v1` 后缀都通, 三个协议端口一律如此: `http://<host>:10010` (Anthropic SDK 约定) 与 `http://<host>:10010/v1` (OpenAI SDK 约定, 也是多数客户端 placeholder 的写法) 等价; 客户端重复拼出的 `/v1/v1/...` 一并归一
 - api key 用 `start` / `status` 打印的那份固定值 (三面通用, 永不过期, 直接复制): 代理不校验它, 上游身份一律用本机 OAuth 凭证 -> 任意非空串通常也行, 但 codex 面的部分客户端 (pi-ai 等) 会在发请求前把 key 当 JWT 本地解析取 `chatgpt_account_id`, 只有这份固定值过得去
 - 全放开 CORS: 浏览器页面可直连, 预检由代理直接应答
@@ -66,12 +69,12 @@ jj-agentic-proxy logout all       # anthropic | codex | all
 | 端点 | 端口 | 上游 | 协议 |
 | --- | --- | --- | --- |
 | `POST /v1/chat/completions` | 全部 | 按端口定 | OpenAI Chat Completions |
-| `GET /v1/models`, `/v1/models/{id}` | 全部 | 按端口定 | 见下 |
+| `GET /v1/models`, `/v1/models/{id}` | 全部 | 按端口定 | OpenAI 列表 (仅本端口订阅) |
 | `POST /v1/messages` | 10011 | `api.anthropic.com/v1/messages` | Anthropic Messages |
 | `POST /v1/messages/count_tokens` | 10011 | `api.anthropic.com` 同路径 | Anthropic Messages |
 | `POST /v1/responses` | 10010 | `chatgpt.com/backend-api/codex/responses` | OpenAI Responses |
 | `POST /v1/responses/compact` | 10010 | 上游 `/responses/compact` | OpenAI Responses |
-| `ANY /backend-api/codex/*` | 10010 | `chatgpt.com` 同路径 | 原样透传 (见[透传口](#codex-透传口)) |
+| `ANY /backend-api/codex/*` | 10010 | `chatgpt.com` 同路径 | 原样透传 ([透传口](#codex-透传口)) |
 | `GET /health` | 全部 | — | 本端口协议面 + 登录状态 + 可用路径 |
 
 - Chat Completions 的上游由端口决定, `model` 只取模型名 (允许 `anthropic/`、`openai/` 前缀)
@@ -79,7 +82,7 @@ jj-agentic-proxy logout all       # anthropic | codex | all
 - 采样参数 (`temperature` / `top_p` / `top_k`) 在所有 Anthropic 面 (10011 原生 + 10011/10012 Chat Completions) 一律丢弃: 上游新模型按「键是否存在」硬拒 (400 `` `temperature` is deprecated ``), 与取值无关, 且受限名单随新模型扩张 -> 不做模型名判断
 - 10011 的 Chat Completions 把 `reasoning_effort` 映射成上游现行思考档位
 - 10012 只有 Chat Completions 与模型列表 (原生 Messages 走 10011), 字段支持度以[上游兼容层](https://platform.claude.com/docs/en/api/openai-sdk)为准: 无 `reasoning_content`, `response_format` / `reasoning_effort` / `seed` 等被上游静默忽略
-- `/v1/models` 形状: 10011 带 `x-api-key` / `anthropic-version` -> Anthropic 官方原样; 其余 (含 10010 / 10012) -> OpenAI 列表, 只含本端口订阅的模型
+- `/v1/models` 只在 10011 且请求带 `x-api-key` / `anthropic-version` 时给 Anthropic 官方原样, 其余一律 OpenAI 列表
 - 错误一律按方言裹官方信封 (`{"type":"error",...}` / `{"error":{...}}`); 上游已给官方形状则原样透传, 保留 `request-id` 等头
 
 ## Codex 透传口
@@ -90,8 +93,7 @@ jj-agentic-proxy logout all       # anthropic | codex | all
 curl http://127.0.0.1:10010/backend-api/codex/usage  # 订阅额度: plan_type + rate_limit 窗口 + used_percent
 ```
 
-- 与其余端点一样吃 `/v1` 前缀: base url 按 OpenAI SDK 约定写成 `.../v1` 时拼出的 `/v1/backend-api/codex/*` 同样命中
-- 不需要 api key: 与其余端点一样, 代理不校验客户端凭证, 上游身份一律用本机 OAuth
+- 与其余端点同规: 吃 `/v1` 前缀 (base url 按 OpenAI SDK 约定写成 `.../v1` 时拼出的 `/v1/backend-api/codex/*` 同样命中) + 不需要 api key (代理不校验客户端凭证, 上游身份一律用本机 OAuth)
 - 已验证的子路径只有 `/usage`; `/responses`、`/models` 走上表正式端点即可 (带本地转换 + 方言归一)
 - 上游是 Codex CLI 私有后端, 无公开文档: 路径与响应形状随时可能变, 本口只保证转发, 不保证上游长期可用
 
@@ -124,8 +126,11 @@ curl http://127.0.0.1:10010/backend-api/codex/usage  # 订阅额度: plan_type +
 
 - 左列表 (新 -> 旧) + 右上下面板: 选中一条即绑定展示它的 Request / Response
 - 两组切换互不干扰: `Client ↔ Proxy` / `Proxy ↔ Upstream` 选哪条腿, `核心内容` / `原始报文` 选哪种读法 (⌘D)
-- 核心内容 (默认): 见下「核心内容视图」
+- 核心内容 (默认): 几百帧碎 SSE 先重建成完整消息再排纯文本, 请求侧从嵌套 JSON 抽出对话轮次 (system 或 `instructions` + 逐轮消息, 轮内工具调用与结果缩进挂在该轮下), 响应给方言 / 帧数 / 是否收到收尾事件 / usage 摘要后按产出顺序排 text / thinking / tool_call 段; 工具参数逐帧拼回完整 JSON, 流被截断没拼全就原样给
+- 核心内容认三种方言 (与三个协议面一致): Anthropic Messages / OpenAI Chat Completions / OpenAI Responses, 流式与非流式同一套渲染; 认不出就每帧压成一行, 非对话请求 (`/v1/models`、`count_tokens`) 回退成原 JSON -> 永远给得出东西
+- 「空」与「拿不到」分开说: 上游只回签名不回思考正文时标注加密, 不显示成空内容
 - 原始报文: 起始行 + header (按名排序) + 空行 + body; JSON 缩进展示 (对象键按字典序, 数组保持线上原序), SSE / 文本原样
+- 核心内容单段超 128KB / 全文超 4MB 截断展示, 提示切「原始报文」看全文 (日志文件里一律全量)
 - 每面板可 Copy (复制当前视图的文本)
 - 顶栏 Follow 自动读入新记录 (选中行不跳走), 日期下拉切换历史, 过滤框按 path / model / status / surface 多词 AND
 - 数据只读: 记录由代理写, 查看器从不写回
@@ -135,18 +140,6 @@ curl http://127.0.0.1:10010/backend-api/codex/usage  # 订阅额度: plan_type +
 - 浏览器版 (`:10020`): 操作直接调进程内的同一套实现, 不 exec CLI; `Console` 面板跑 Status / Models / Login / Logout / Stop 并回显。**`start` 例外** —— 页面由代理进程本身提供, 进程没起来时页面也不存在, 只能在终端执行
 - macOS app (`app/`, SwiftPM + AppKit, 零第三方依赖): 全部转调 CLI 子进程 (`Console…` 面板实时回显), 因此 Start 也能点; app 不复刻任何判断
 - Login 的授权回调端口写死在上游 client_id allow-list -> 浏览器只会开在跑着代理的那台机器上, 与从哪台机器点的无关
-
-### 核心内容视图
-
-SSE 原文是几百帧被切碎的 `event:` / `data:`, 人读不了 -> 先重建成完整消息再排纯文本. 请求侧同理: 从嵌套 JSON 里抽出对话轮次.
-
-- 请求: `model` / `stream` / token 上限 / 采样参数一行, `tools` 名字一行; 之后 system (或 `instructions`) + 逐轮消息, 轮内的工具调用与结果缩进挂在该轮下
-- 响应: 方言 + 帧数 + 是否收到收尾事件一行, `model` / `id` / `stop` 一行, usage 一行 (只留非 0 计数), 帧种类计数一行; 之后按产出顺序排 text / thinking / tool_call 段
-- 工具参数逐帧拼回完整 JSON 再缩进展示; 流被截断没拼全就原样给
-- 认三种方言 (与三个协议面一致): Anthropic Messages / OpenAI Chat Completions / OpenAI Responses; 流式与非流式同一套渲染
-- 认不出方言: 每帧压成一行列出; 非对话请求 (`/v1/models`、`count_tokens`) 回退成原 JSON -> 永远给得出东西
-- 「空」与「拿不到」分开说: 上游只回签名不回思考正文时标注加密, 不显示成空内容
-- 单段超 128KB / 全文超 4MB 截断展示, 提示切「原始报文」看全文 (日志文件里一律全量)
 
 ## 架构
 
@@ -178,36 +171,26 @@ SSE 原文是几百帧被切碎的 `event:` / `data:`, 人读不了 -> 先重建
 ## 结构
 
 ```
-src/main.rs               CLI (start / stop / login / logout / status / models / logs) + 四个固定端口 + 优雅退出
-src/daemon.rs             后台常驻: 单实例锁 + 探活 + 启停 + 日志封顶
-src/reqlog.rs             往返记录: 一行一次 req/res + 按天分文件 (不清理) + logs 摘要
-src/server.rs             端口层: Chat Completions + 模型列表 + 往返记录挂点, 其余落透传
-src/proxy.rs              透传: 上游由端口定 + header 注入 + body 规范化 + 带凭证请求上游
-src/convert/mod.rs        Chat Completions 增量模型 + 流式回传 / 非流式聚合
-src/convert/codex.rs      Chat Completions <-> OpenAI Responses
-src/convert/anthropic.rs  Chat Completions <-> Anthropic Messages
-src/sse.rs                SSE 解码
-src/auth.rs               凭证内存态 + 到期预判 + 单飞刷新
-src/oauth.rs              PKCE + 本机回调服务 + 两家 token 换取/刷新
-src/provider.rs           协议面 <-> 端口 / 订阅映射 + 两家上游常量 (client_id / endpoint / CLI 冒充参数)
-src/store.rs              auth.json 读写 (原子 + 0600)
-src/webui.rs              浏览器查看器后端: 只读接口 (日期 / 增量索引 / 整行原文) + 状态 + 服务操作
-src/webui/app.html        浏览器查看器前端: 单文件 (include_str! 进二进制), 零外部资源
-scripts/install-local.sh  预部署总入口: 跑 app/package.sh -> 把 ~/.local/bin/jj-agentic-proxy 链到包体内 CLI
+src/main.rs                    CLI (start / stop / login / logout / status / models / logs) + 四个固定端口 + 优雅退出
+src/daemon.rs                  后台常驻: 单实例锁 + 探活 + 启停 + 日志封顶
+src/server.rs                  端口层: Chat Completions + 模型列表 + 往返记录挂点, 其余落透传
+src/proxy.rs                   透传: 上游由端口定 + header 注入 + body 规范化 + 带凭证请求上游
+src/convert/ + sse.rs          Chat Completions <-> OpenAI Responses (codex.rs) / Anthropic Messages (anthropic.rs); mod.rs 增量模型 + 流式回传 / 非流式聚合; sse.rs 解码
+src/reqlog.rs                  往返记录: 一行一次 req/res + 按天分文件 (不清理) + logs 摘要
+src/{auth,oauth,store}.rs      凭证内存态 / 到期预判 / 单飞刷新; PKCE + 本机回调 + 两家 token 换取·刷新; auth.json 原子写 0600
+src/provider.rs                协议面 <-> 端口 / 订阅映射 + 两家上游常量 (client_id / endpoint / CLI 冒充参数)
+src/webui.rs + webui/app.html  浏览器查看器: 只读接口 (日期 / 增量索引 / 整行原文) + 状态 + 服务操作; 前端单文件 include_str! 进二进制, 零外部资源
+scripts/install.sh             安装器: 装 /Applications + 链接终端命令 + 摘 quarantine; 无本地 bundle (curl | bash) 时先拉最新 release
+scripts/install-local.sh       本机预部署总入口 = 本机架构构建 + 装机 (→ workflow.md)
+scripts/make-dist.sh           分发打包: universal 构建 -> dist/ 下 tar.gz + dmg + install.sh + SHA256SUMS + release notes
+.github/workflows/release.yml  打 tag 即发版: 验证 + 跑 make-dist.sh + 产物传 GitHub Release (CI 是脚本的薄壳, 本机可复现)
 
-app/Package.swift         macOS 查看器 app: SwiftPM executable (macOS 13+, AppKit)
-app/package.sh            CLI + viewer Release 构建 + 组装 .app (CLI 进 Contents/MacOS) + ad-hoc 签名 + 装 /Applications (版本取自 Cargo.toml)
-app/Resources/            bundle 模板 (Info.plist.in, `@VERSION@` 占位)
+app/                           macOS 查看器 app: SwiftPM + AppKit (macOS 13+, 零第三方依赖); package.sh 组装 bundle, Resources/ 存 Info.plist.in (`@VERSION@` 占位)
 app/Sources/jj-agentic-proxy/
-  main.swift              入口 + `--snapshot <png>` 界面自检
-  AppDelegate.swift       主窗口 + 尺寸持久化
-  MainMenu.swift          程序化主菜单
-  MainViewController.swift 列表 + 过滤 + follow + 详情绑定
-  BodyPane.swift          单个 body 面板 (等宽只读 + Copy)
-  CoreContent.swift       核心内容视图: SSE 重建 + 三方言归一 + 纯文本排版
-  TrafficRecord.swift     一行记录的摘要模型 + 行首摘要解析
-  TrafficReader.swift     日期枚举 + 增量索引 + 按 (offset, length) 现取全文 (原始报文 + 核心内容各一份)
-  ConsoleWindowController.swift  CLI 控制台面板
-  CommandRunner.swift     跑 CLI 子命令 + 输出实时回吐
-  ProxyPaths.swift        CLI 定位 (首选自身同目录那份) / 日志目录
+  MainViewController.swift + BodyPane.swift            列表 / 过滤 / follow / 详情绑定 + 单 body 面板 (等宽只读 + Copy)
+  CoreContent.swift                                    核心内容视图: SSE 重建 + 三方言归一 + 纯文本排版
+  TrafficRecord.swift + TrafficReader.swift            行首摘要解析 + 日期枚举 / 增量索引 / 按 (offset, length) 现取全文
+  ConsoleWindowController.swift + CommandRunner.swift  CLI 控制台面板 + 子进程输出实时回吐
+  main.swift + AppDelegate.swift + MainMenu.swift      入口 (`--snapshot <png>` 界面自检) / 主窗口 + 尺寸持久化 / 主菜单
+  ProxyPaths.swift                                     CLI 定位 (首选自身同目录那份) / 日志目录
 ```

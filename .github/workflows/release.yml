@@ -1,0 +1,86 @@
+# 打 tag 即发版: universal 构建 -> tar.gz / dmg / install.sh / SHA256SUMS 传到 GitHub Release。
+# 打包逻辑全在 scripts/make-dist.sh, 这里只做环境准备与上传 -> 本机跑同一脚本即可复现。
+# workflow_dispatch 是干跑: 走完整打包但不建 release, 产物留在 workflow artifact。
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    # macOS 26 镜像 = arm64 + Xcode 26 (Package.swift 要 Swift 6.2+ 的 defaultIsolation)
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 选 Swift 6.2+ 的 Xcode
+        # 不写死 Xcode 路径 (镜像会换版本): 默认够用就不动, 不够则在已装版本里挑最高的
+        run: |
+          set -euo pipefail
+          swift_ver() { DEVELOPER_DIR="$1" swift -version 2>/dev/null | sed -n 's/.*Apple Swift version \([0-9][0-9.]*\).*/\1/p' | head -1; }
+          ge62() { [ -n "$1" ] && [ "$(printf '%s\n6.2\n' "$1" | sort -V | head -1)" = "6.2" ]; }
+          cur="$(swift_ver "$(xcode-select -p)")"
+          if ge62 "$cur"; then echo "默认 Xcode 的 Swift $cur, 直接用"; else
+            best=""; best_v=""
+            for x in /Applications/Xcode*.app; do
+              [ -d "$x" ] || continue
+              v="$(swift_ver "$x/Contents/Developer")"
+              ge62 "$v" || continue
+              if [ -z "$best_v" ] || [ "$(printf '%s\n%s\n' "$v" "$best_v" | sort -V | tail -1)" = "$v" ]; then best="$x"; best_v="$v"; fi
+            done
+            [ -n "$best" ] || { echo "镜像里没有 Swift 6.2+ 的 Xcode (默认 ${cur:-未知})" >&2; exit 1; }
+            sudo xcode-select -s "$best/Contents/Developer"
+            echo "切到 $best (Swift $best_v)"
+          fi
+          swift -version
+          cargo --version
+
+      - name: 验证
+        run: |
+          set -euo pipefail
+          rustup component add clippy rustfmt
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+
+      - name: 打包
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            ./scripts/make-dist.sh --expect-version "${GITHUB_REF_NAME#v}"
+          else
+            ./scripts/make-dist.sh
+          fi
+
+      - name: 上传 workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-universal
+          path: dist/
+          retention-days: 14
+
+      - name: 发 GitHub Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          FILES=(dist/*.tar.gz dist/*.dmg dist/install.sh dist/SHA256SUMS)
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${FILES[@]}" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --title "$GITHUB_REF_NAME" \
+              --notes-file dist/RELEASE_NOTES.md \
+              "${FILES[@]}"
+          fi

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# 预部署总入口: app bundle 装 /Applications (viewer + CLI 都在里面), 再把 ~/.local/bin/jj-agentic-proxy 指过去。
+# 本机预部署总入口: 本机架构构建 -> 装 /Applications + 链接终端命令。
 # Usage: ./scripts/install-local.sh   (在任意目录跑, 脚本自己 cd 到仓库根)
-# 升级只重跑本脚本: CLI 是 bundle 内那份的 symlink, 不存在两份各自升级 / 版本错位。
+# 分发包 (universal + tar.gz/dmg) 走 scripts/make-dist.sh, 不走这里。
 
 set -euo pipefail
 
@@ -14,25 +14,5 @@ done
 
 cd "$(dirname "$0")/.."
 
-BIN_NAME="jj-agentic-proxy"
-INSTALL_DIR="$HOME/.local/bin"
-CLI_IN_APP="/Applications/${BIN_NAME}.app/Contents/MacOS/${BIN_NAME}-cli"
-
 ./app/package.sh
-
-echo
-echo "==> 链接 CLI: ${INSTALL_DIR}/${BIN_NAME} -> ${CLI_IN_APP}"
-[ -x "$CLI_IN_APP" ] || { echo "bundle 内没有 CLI: $CLI_IN_APP" >&2; exit 1; }
-mkdir -p "$INSTALL_DIR"
-# symlink 而非拷贝: app 是唯一副本, 二进制换了 alias 自动跟随 (-f 覆盖旧的普通文件 / 旧链接)
-ln -sfn "$CLI_IN_APP" "${INSTALL_DIR}/${BIN_NAME}"
-
-case ":$PATH:" in
-  *":$INSTALL_DIR:"*) ;;
-  *) echo "warning: add to PATH → export PATH=\"$INSTALL_DIR:\$PATH\"" ;;
-esac
-
-echo "==> 验证"
-"${INSTALL_DIR}/${BIN_NAME}" --version
-
-echo "==> 旧代理进程仍是上一版: 执行 ${BIN_NAME} start 切到新版本 (start 自带 restart)"
+./scripts/install.sh "app/build/jj-agentic-proxy.app"

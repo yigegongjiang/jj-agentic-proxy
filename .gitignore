@@ -5,3 +5,4 @@
 /app/build
 /app/.swiftpm
 /app/Package.resolved
+/dist
