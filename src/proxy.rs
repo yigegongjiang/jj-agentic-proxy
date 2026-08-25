@@ -2,17 +2,19 @@
 //!
 //! 只做官方协议要求的最小改写: 客户端看到的行为必须与官方 api key 服务一致。
 
+use std::io::Read as _;
 use std::sync::Arc;
 use std::time::Instant;
 
 use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::http::header::{
-    ACCEPT, AUTHORIZATION, CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, TRANSFER_ENCODING, UPGRADE,
-    USER_AGENT,
+    ACCEPT, AUTHORIZATION, CONNECTION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE,
+    TRANSFER_ENCODING, UPGRADE, USER_AGENT,
 };
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
+use ruzstd::decoding::StreamingDecoder;
 use serde_json::{json, Map, Value};
 
 use crate::auth::AuthManager;
@@ -173,6 +175,10 @@ pub(crate) async fn handle(
         );
     };
 
+    let body = match decode_request_body(&headers, body) {
+        Ok(b) => b,
+        Err(msg) => return dialect.error(StatusCode::BAD_REQUEST, "invalid_request", &msg),
+    };
     let (body, plan) = prepare_body(&target, body);
     let started = Instant::now();
 
@@ -262,6 +268,9 @@ pub(crate) fn error_kind(status: StatusCode) -> &'static str {
 ///
 /// `Err` 已是可直接返回给客户端的错误响应。
 #[allow(clippy::too_many_arguments)]
+// Err 变体就是一个已构造好的 HTTP 错误响应, 不是错误值; Box 化只是把同一份数据搬上堆,
+// 每请求一次的 128 字节换不来任何东西。
+#[allow(clippy::result_large_err)]
 pub(crate) async fn upstream(
     app: &App,
     provider: Provider,
@@ -417,6 +426,44 @@ fn sub_path<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
 }
 
 // ---------- body: 上游协议硬要求 ----------
+
+/// 解压后请求体上限。正常请求远小于此; 上限只防畸形压缩包把本机内存撑爆。
+const MAX_DECODED_BODY: usize = 64 * 1024 * 1024;
+
+/// 客户端压缩过的请求体一律在入口解开, 之后全链路只见明文。
+///
+/// codex 面的客户端 (官方 CLI、pi-ai 等) 会把 body 压成 zstd 并带
+/// `content-encoding: zstd`。本层的 body 规范化 (`prepare_body`) 与全量往返记录都要读
+/// 明文, 而发往上游的 header 是从零构建的官方 CLI 身份、不带 `content-encoding` ->
+/// 压缩体原样透传会被上游按明文 JSON 解析而 400。上游同时接受未压缩 body, 解开即可。
+///
+/// 只认 zstd: 其余非 identity 编码在这里明确拒绝, 好过把压缩字节冒充明文发给上游。
+fn decode_request_body(headers: &HeaderMap, body: Bytes) -> Result<Bytes, String> {
+    let Some(encoding) = headers.get(CONTENT_ENCODING).and_then(|v| v.to_str().ok()) else {
+        return Ok(body);
+    };
+    let encoding = encoding.trim();
+    if encoding.is_empty() || encoding.eq_ignore_ascii_case("identity") {
+        return Ok(body);
+    }
+    if !encoding.eq_ignore_ascii_case("zstd") {
+        return Err(format!(
+            "unsupported content-encoding `{encoding}`: 本代理只解 zstd, 也可直接发未压缩 body"
+        ));
+    }
+    let fail = |e: &dyn std::fmt::Display| format!("zstd 请求体解压失败: {e}");
+    let mut decoder = StreamingDecoder::new(body.as_ref()).map_err(|e| fail(&e))?;
+    let mut out = Vec::new();
+    decoder
+        .by_ref()
+        .take(MAX_DECODED_BODY as u64 + 1)
+        .read_to_end(&mut out)
+        .map_err(|e| fail(&e))?;
+    if out.len() > MAX_DECODED_BODY {
+        return Err(format!("zstd 请求体解压后超过 {MAX_DECODED_BODY} 字节上限"));
+    }
+    Ok(Bytes::from(out))
+}
 
 /// 上游与客户端期望的差异, 由本层补齐。
 #[derive(Debug, PartialEq, Eq)]
@@ -781,6 +828,53 @@ pub(crate) fn json_body(status: StatusCode, value: Value) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn encoded(value: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(CONTENT_ENCODING, HeaderValue::from_str(value).unwrap());
+        h
+    }
+
+    #[test]
+    fn zstd_request_body_is_decoded() {
+        // codex 面的客户端 (官方 CLI / pi-ai) 压缩 body; 解开后才轮得到 prepare_body。
+        let plain = br#"{"model":"gpt-5.6-sol","stream":true}"#;
+        let compressed = ruzstd::encoding::compress_to_vec(
+            plain.as_slice(),
+            ruzstd::encoding::CompressionLevel::Fastest,
+        );
+        let decoded =
+            decode_request_body(&encoded("zstd"), Bytes::from(compressed)).expect("应解压成功");
+        assert_eq!(decoded.as_ref(), plain.as_slice());
+    }
+
+    #[test]
+    fn uncompressed_request_body_passes_through() {
+        let plain = Bytes::from_static(b"{}");
+        assert_eq!(
+            decode_request_body(&HeaderMap::new(), plain.clone()).unwrap(),
+            plain
+        );
+        assert_eq!(
+            decode_request_body(&encoded("identity"), plain.clone()).unwrap(),
+            plain
+        );
+    }
+
+    #[test]
+    fn unknown_content_encoding_is_rejected() {
+        // 静默透传会让上游把压缩字节当明文 JSON 解析, 错误落在上游而非这里。
+        let err = decode_request_body(&encoded("gzip"), Bytes::from_static(b"\x1f\x8b"))
+            .expect_err("未支持的编码应被拒绝");
+        assert!(err.contains("gzip"), "{err}");
+    }
+
+    #[test]
+    fn malformed_zstd_body_is_rejected() {
+        let err = decode_request_body(&encoded("zstd"), Bytes::from_static(b"not zstd"))
+            .expect_err("坏帧应被拒绝");
+        assert!(err.contains("zstd"), "{err}");
+    }
 
     fn resolved(surface: Surface, path: &str) -> Target {
         resolve(surface, path, None).expect("路径应可解析")

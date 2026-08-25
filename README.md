@@ -53,7 +53,7 @@ jj-agentic-proxy logout all       # anthropic | codex | all
 - 10011 与 10012 同一份 Claude 订阅凭证, 只是协议转换发生在本地还是上游
 - 请求打到哪个端口就走哪家订阅, 与 model 名无关; 路径走错端口时 404 直接给出正确端口
 - base url 两家官方写法都通: `http://<host>:10011` (Anthropic SDK 约定) 与 `http://<host>:10011/v1` (OpenAI SDK 约定)
-- api key 填任意非空值即可 (官方 SDK 会本地校验非空); 代理不校验它, 上游身份一律用本机 OAuth 凭证
+- api key 用 `start` / `status` 打印的那份固定值 (三面通用, 永不过期, 直接复制): 代理不校验它, 上游身份一律用本机 OAuth 凭证 -> 任意非空串通常也行, 但 codex 面的部分客户端 (pi-ai 等) 会在发请求前把 key 当 JWT 本地解析取 `chatgpt_account_id`, 只有这份固定值过得去
 - 全放开 CORS: 浏览器页面可直连, 预检由代理直接应答
 
 ## 端点
@@ -145,6 +145,8 @@ SSE 原文是几百帧被切碎的 `event:` / `data:`, 人读不了 -> 先重建
 - 后台日志单文件 8MB 上限, 满则轮转一份 -> 磁盘占用恒定, 不随运行时长增长
 - 认证: OAuth PKCE (S256); 回调端口被上游 client_id allow-list 写死 (Anthropic 54545 / Codex 1455), 登录时须空闲
 - 凭证: `auth.json` 进程间串行 + 原子写 + 0600; login/logout 热更新; 到期前 300s 主动刷新, 每 provider 单飞锁; 上游 401 时强制续期并重试一次
+- 请求体带 `content-encoding: zstd` (官方 Codex CLI / pi-ai 会压) 一律在入口解开: body 规范化与往返记录都要读明文, 转发给上游恒为未压缩; 其余非 identity 编码直接 400, 好过把压缩字节冒充明文送上去
+- 只提供 HTTP: codex 面客户端先试 WebSocket 时 (pi-ai `transport: auto`) 拿到 405 并自动回落 SSE; 客户端直接配 `transport: sse` 可省掉这次试探
 - 透传路径: 注入 Bearer 与官方 CLI header, body 只做上游硬要求的最小改写
   - OAuth 凭证的 system 闸门 (实测): 上游只认 system **首块**且要求与 Claude Code 前缀**逐字节全等**; 前缀与正文同块、多一个尾随换行、前缀排在后面的块里, 一律被拒 —— 且报成 429 `rate_limit_error`, 极易误判为限流
   - Anthropic 原生: 首块不合规就在最前面补一块纯前缀 (不带 `cache_control`, 不占客户端的缓存断点、不打乱 ttl 顺序); 首块之后不受限制 -> 客户端 system 原样保留

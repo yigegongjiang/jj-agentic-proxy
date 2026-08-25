@@ -225,6 +225,8 @@ pub(crate) fn print_endpoints() {
     if let Some(ip) = lan_ip() {
         println!("  局域网同端口: http://{ip} (无鉴权, 仅限可信内网)");
     }
+    // 代理不校验 key, 但 codex 面的部分客户端会本地解析它 -> 给一份能直接复制的。
+    println!("- {:<13} {}", "api key", provider::CLIENT_API_KEY);
 }
 
 async fn login(name: &str) -> Result<()> {

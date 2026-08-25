@@ -20,6 +20,19 @@ pub const BIND_WILDCARDS: [&str; 2] = ["::", "0.0.0.0"];
 /// 打印 base url 用的本机地址 (局域网客户端换成本机 LAN IP)。
 pub const HOST: &str = "127.0.0.1";
 
+/// 客户端填的 api key。代理不校验它, 但 codex 协议面的部分客户端 (pi-ai 等) 会在发请求
+/// 前把它当 JWT 本地解析, 取 `https://api.openai.com/auth` 下的 `chatgpt_account_id`
+/// 当 `chatgpt-account-id` 头 -> 随便一个非空串会让这些客户端连请求都发不出去。
+///
+/// 这里给一份固定的合法 JWT 形态值, 三个协议面通用。上游身份一律用本机 OAuth 凭证,
+/// 客户端送来的 authorization 与 chatgpt-account-id 都会被 `codex_headers` 覆盖 ->
+/// 这个值只满足客户端本地解析, 不参与任何鉴权。
+///
+/// - 不带 `exp`: 永不过期, 客户端配一次就不用再动
+/// - payload 明文: `{"https://api.openai.com/auth":{"chatgpt_account_id":"jj-agentic-proxy"}}`
+/// - 三段 base64 都落在标准与 url-safe 字母表的交集 (无 `+` `/` `-` `_`) -> 两种解码器都能读
+pub const CLIENT_API_KEY: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiamotYWdlbnRpYy1wcm94eSJ9fQ.jjagenticproxy";
+
 /// Web 查看器端口。刻意不进 `Surface`: 它不是协议面, 没有上游与凭证映射,
 /// 混进去会让透传 / 模型列表 / 错误信封到处长出「这个面不是代理」的分支。
 pub const UI_PORT: u16 = 10020;
@@ -185,4 +198,29 @@ pub fn codex_user_agent() -> String {
         other => other,
     };
     format!("{CODEX_ORIGINATOR}/{} ({os}; {arch})", codex_cli_version())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::engine::general_purpose::STANDARD_NO_PAD;
+    use base64::Engine as _;
+
+    /// 客户端拿这个值当 JWT 解析 -> 改坏了只会在客户端侧报错, 这里守住形状。
+    #[test]
+    fn client_api_key_carries_chatgpt_account_id() {
+        let parts: Vec<&str> = CLIENT_API_KEY.split('.').collect();
+        assert_eq!(parts.len(), 3, "JWT 必须三段");
+        assert!(
+            !CLIENT_API_KEY.contains(['+', '/', '-', '_']),
+            "标准与 url-safe base64 解码器都要能读"
+        );
+        let payload = STANDARD_NO_PAD.decode(parts[1]).expect("payload 应可解码");
+        let value: serde_json::Value = serde_json::from_slice(&payload).expect("payload 应是 JSON");
+        assert_eq!(
+            value["https://api.openai.com/auth"]["chatgpt_account_id"],
+            "jj-agentic-proxy"
+        );
+        assert!(value.get("exp").is_none(), "MUST NOT 带时效值");
+    }
 }
