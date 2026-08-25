@@ -13,6 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApp.mainMenu = MainMenu.build()
         setupWindow()
         NSApp.activate(ignoringOtherApps: true)
+        CLIInstallPrompt.runIfNeeded(in: window) // 终端命令没装就当场弹窗装 (装过则静默)
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }

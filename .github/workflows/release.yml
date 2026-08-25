@@ -1,4 +1,4 @@
-# 打 tag 即发版: arm64 / x86_64 各构建一套 -> tar.gz / dmg / install.sh / SHA256SUMS 传到 GitHub Release。
+# 打 tag 即发版: arm64 / x86_64 各构建一套 -> dmg + SHA256SUMS 传到 GitHub Release。
 # 打包逻辑全在 scripts/make-dist.sh, 这里只做环境准备与上传 -> 本机跑同一脚本即可复现。
 # workflow_dispatch 是干跑: 走完整打包但不建 release, 产物留在 workflow artifact。
 name: release
@@ -75,7 +75,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          FILES=(dist/*.tar.gz dist/*.dmg dist/install.sh dist/SHA256SUMS)
+          FILES=(dist/*.dmg dist/SHA256SUMS)
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" "${FILES[@]}" --clobber
           else

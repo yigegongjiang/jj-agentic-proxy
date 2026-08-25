@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# 分发打包: 按架构各出一套 -> dist/ 下 tar.gz + dmg (arm64 / x86_64) + install.sh + SHA256SUMS + RELEASE_NOTES.md。
+# 分发打包: 按架构各出一个 dmg (arm64 / x86_64) -> dist/ 下 dmg + SHA256SUMS + RELEASE_NOTES.md。
 # GitHub Actions 只是这个脚本的薄壳 -> 本机跑一遍即可复现 CI 结果。
+# 只发 dmg: 用户下载 -> 拖进「应用程序」-> 打开 app 点「好」装终端命令 (CLIInstall.swift), 不需要任何安装脚本。
 # 不发 universal: 包体内混进 Intel slice 会让 macOS 26.4+ 弹「Support Ending for Intel-based Apps」。
 #
 # Usage: ./scripts/make-dist.sh [--expect-version X.Y.Z]
@@ -39,34 +40,18 @@ for ARCH in $ARCHS; do
   BUNDLE="$REPO/app/build/$APP_NAME.app"
   BASE="$APP_NAME-macos-$ARCH"
 
-  STAGE="$DIST/stage"
-  rm -rf "$STAGE"
-  mkdir -p "$STAGE"
-  # ditto 而非 cp -R: 保留签名相关元数据
-  ditto "$BUNDLE" "$STAGE/$APP_NAME.app"
-  cp "$REPO/scripts/install.sh" "$STAGE/install.sh"
-  chmod +x "$STAGE/install.sh"
-
-  echo "==> 打 $BASE.tar.gz"
-  # --no-mac-metadata --no-xattrs: 签名内嵌在 Mach-O 里, 不依赖 xattr; 去掉可避免 ._ 伴生文件与 quarantine 残留
-  tar --no-mac-metadata --no-xattrs -czf "$DIST/$BASE.tar.gz" -C "$STAGE" "$APP_NAME.app" install.sh
-
   echo "==> 打 $BASE.dmg"
-  # 拖拽安装用: 卷内放 .app + /Applications 快捷方式 + install.sh (只有它会建终端命令的链接)
+  # 卷内只放 .app + /Applications 快捷方式 -> 打开就是一次拖拽, 没有第二个可点的东西
   DMG_SRC="$DIST/dmg-src"
   rm -rf "$DMG_SRC"
   mkdir -p "$DMG_SRC"
+  # ditto 而非 cp -R: 保留签名相关元数据
   ditto "$BUNDLE" "$DMG_SRC/$APP_NAME.app"
   ln -s /Applications "$DMG_SRC/Applications"
-  cp "$REPO/scripts/install.sh" "$DMG_SRC/install.sh"
   hdiutil create -quiet -volname "$APP_NAME $VERSION" -srcfolder "$DMG_SRC" \
     -fs HFS+ -format UDZO -ov "$DIST/$BASE.dmg"
-  rm -rf "$DMG_SRC" "$STAGE"
+  rm -rf "$DMG_SRC"
 done
-
-echo
-echo "==> 附带 install.sh (curl 一条命令安装的入口, 自己按架构选包)"
-cp "$REPO/scripts/install.sh" "$DIST/install.sh"
 
 echo "==> 提取 release notes"
 # 锚定 `## [X.Y.Z]` 到下一个 `## [`; CHANGELOG 顶部有 When Editing 说明块, 不能用「第一段」这种取法
@@ -78,7 +63,7 @@ awk -v v="$VERSION" '
 [ -s "$DIST/RELEASE_NOTES.md" ] || { echo "CHANGELOG.md 里没有 [$VERSION] 段落" >&2; exit 1; }
 
 echo "==> 校验和"
-( cd "$DIST" && shasum -a 256 ./*.tar.gz ./*.dmg install.sh | sed 's| \./| |' > SHA256SUMS )
+( cd "$DIST" && shasum -a 256 ./*.dmg | sed 's| \./| |' > SHA256SUMS )
 
 echo "==> 完成 (version $VERSION)"
 ls -lh "$DIST"

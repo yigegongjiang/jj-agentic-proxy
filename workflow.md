@@ -12,10 +12,9 @@
 - `gh`: 已登录
 - `cargo`: 本机 toolchain; 未登录 crates.io -> 不发布 crate
 - `swift`: 本机 Swift 6.2+ / Xcode 26+ (查看器 app 用 `defaultIsolation`)
-- `scripts/install-local.sh`: 本机预部署总入口 = `app/package.sh` + `scripts/install.sh`
+- `scripts/install-local.sh`: 本机预部署总入口 = `app/package.sh` + 装 `/Applications` + 链接 `~/.local/bin` + `--version` 自检; 只给开发用 (用户侧安装 = 拖 dmg + 开 app 点「好」, 不跑脚本)
 - `app/package.sh [--arch arm64|x86_64]`: CLI + viewer 单架构构建 -> 组装 bundle -> ad-hoc 签名 -> `app/build/jj-agentic-proxy.app`; 只构建, 不装机
-- `scripts/install.sh [<.app>]`: 装 `/Applications` + 链接 `~/.local/bin` + 摘 quarantine; 不给路径且不在 release 包内 -> 拉最新 release 装
-- `scripts/make-dist.sh [--expect-version X.Y.Z]`: 分发打包 -> `dist/` (arm64 / x86_64 各一套 tar.gz + dmg, 外加 install.sh + SHA256SUMS + RELEASE_NOTES.md); CI 跑的就是它, 本机原样可复现
+- `scripts/make-dist.sh [--expect-version X.Y.Z]`: 分发打包 -> `dist/` (arm64 / x86_64 各一个 dmg, 外加 SHA256SUMS + RELEASE_NOTES.md); CI 跑的就是它, 本机原样可复现
 
 # 调试
 
@@ -93,10 +92,11 @@ push tag 即触发 GHA `release`: macOS runner 上跑 `scripts/make-dist.sh` (�
 
 ```bash
 gh run watch "$(gh run list --workflow release --limit 1 --json databaseId --jq '.[0].databaseId')"
-gh release view vX.Y.Z   # 资产: arm64/x86_64 各 tar.gz + dmg, 外加 install.sh + SHA256SUMS
+gh release view vX.Y.Z   # 资产: arm64/x86_64 各一个 dmg, 外加 SHA256SUMS
 ```
 
 - CI 失败即交付未完成: 修因 -> 删 tag 重推 (Release 尚未建出时无残留)
-- 无 Apple 开发者签名, 产物只做 ad-hoc 签名: 用户从 `install.sh` 装即可, 不需要去系统设置放行 (README 安装段已说明)
+- 无 Apple 开发者签名 (ad-hoc + 无 notary ticket): 用户从 dmg 拖进来首次打开必被 Gatekeeper 拦, 提示「未打开 / Apple 无法验证」-> 系统设置 → 隐私与安全性 → 仍要打开 (README 安装段已说明)。想去掉这一步只能买 Developer ID 做公证
+- 终端命令入口由 app 自己建 (`CLIInstall.swift`: 打开时弹窗 -> `~/.local/bin` symlink + 摘 quarantine): 发布资产内 MUST NOT 再夹带安装脚本
 - MUST NOT 改回 universal 包: 包体内混进另一架构的 slice 会让 macOS 26.4+ 弹「Support Ending for Intel-based Apps」
 - 干跑不发版: Actions 页手动触发 `release` (workflow_dispatch) -> 只出 workflow artifact

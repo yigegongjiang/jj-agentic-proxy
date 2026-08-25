@@ -20,10 +20,17 @@ MUST NOT 写安装 · 上手 (→ README.md) / 发布流程 (→ workflow.md) / 
 | `POST /v1/messages` | 10011 | `api.anthropic.com/v1/messages` | Anthropic Messages |
 | `POST /v1/messages/count_tokens` | 10011 | `api.anthropic.com` 同路径 | Anthropic Messages |
 | `POST /v1/responses` | 10010 | `chatgpt.com/backend-api/codex/responses` | OpenAI Responses |
-| `POST /v1/responses/compact` | 10010 | 上游 `/responses/compact` | OpenAI Responses |
-| `ANY /backend-api/codex/*` | 10010 | `chatgpt.com` 同路径 | 原样透传 ([透传口](#codex-透传口)) |
+| `POST /v1/responses/*` | 10010 | 上游 `/responses` 同子路径 (含 `/compact`) | OpenAI Responses |
+| `ANY /backend-api/codex/*` | 10010 | `chatgpt.com/backend-api/codex` 同路径 | 上游替身入口 ([透传口](#codex-透传口)) |
+| `POST /v1/complete` | 10011 | `api.anthropic.com/v1/complete` | Anthropic legacy Text Completions |
 | `GET /health` | 全部 | — | 本端口协议面 + 登录状态 + 可用路径 |
 
+- 端口层只截 Chat Completions 与模型列表, 其余路径一律落原生透传 (`proxy::resolve`): 按端口前缀白名单放行 -> 上游同路径, body 不改协议只换身份
+  - 10011: `/messages` / `/models` / `/complete` 及其子路径 -> `api.anthropic.com/v1{path}`
+  - 10010: `/responses` 及其子路径 + `/backend-api/codex/*` -> `chatgpt.com/backend-api/codex{...}`
+  - 10012: 只有 `/chat/completions` (交给上游官方兼容层), 别的一概 404
+  - 不在白名单的路径不猜: 404 里列出本端口可用路径 (`proxy::endpoints`, 与 `/health` 同一份)
+  - `endpoints` 列表未含 `/v1/complete`, 而 `resolve` 白名单含 -> 该路径实际转发但不出现在 404 提示与 `/health` 里 (代码不一致, 未改行为)
 - Chat Completions 的上游由端口决定, `model` 只取模型名 (允许 `anthropic/`、`openai/` 前缀)
 - 10010 / 10011 本地转换覆盖: 流式 / 非流式、tools + 工具结果回传、图片 (url 与 data URI)、`response_format`、`reasoning_effort`; 思考内容出 `reasoning_content`
 - 采样参数 (`temperature` / `top_p` / `top_k`) 在所有 Anthropic 面 (10011 原生 + 10011/10012 Chat Completions) 一律丢弃: 上游新模型按「键是否存在」硬拒 (400 `` `temperature` is deprecated ``), 与取值无关, 且受限名单随新模型扩张 -> 不做模型名判断
@@ -34,12 +41,14 @@ MUST NOT 写安装 · 上手 (→ README.md) / 发布流程 (→ workflow.md) / 
 
 ## Codex 透传口
 
-`ANY :10010/backend-api/codex/*` -> `chatgpt.com/backend-api/codex/` 同路径. 其余端点都做协议转换, 这个不做: **body 原样不动, 只换上游身份** (本机 OAuth token + Codex CLI header). 用途 = 直接打本地没建模的上游私有端点.
+`ANY :10010/backend-api/codex/*` -> `chatgpt.com/backend-api/codex` 同路径 = 把上游域名换成本机端口的**替身入口**, 只换上游身份 (本机 OAuth token + Codex CLI header). 用途 = 官方 CLI 那套私有路径直接可打, 不受本地端点清单限制.
 
 ```bash
 curl http://127.0.0.1:10010/backend-api/codex/usage  # 订阅额度: plan_type + rate_limit 窗口 + used_percent
 ```
 
+- 替身入口不等于零改写: `resolve` 把 `/backend-api/codex` 之后的部分当 `upstream_path` -> `/backend-api/codex/responses` 与 `/v1/responses` 拿到同一个 `upstream_path == "/responses"`, 走同一份 `normalize_codex` + 强制 SSE + 非流式聚合 (完全等价的两个入口, 非两条链路); 只有 `/responses` 之外的子路径 (`/usage` 等) 才是 body 原样出去
+- 零改写不止这个口: body 改写按 `upstream_path` 精确门控 (`/v1/messages*` 注 CLI 前缀 + 丢采样参数; 10012 hoist system; Codex 仅 `upstream_path == "/responses"` 才 normalize), 所以 `/responses/compact`、`/v1/complete` 也是 body 原样出去 —— `/v1/complete` 连 Claude Code system 前缀都不注入 (上游是否受理未实测)
 - 与其余端点同规: 吃 `/v1` 前缀 (base url 按 OpenAI SDK 约定写成 `.../v1` 时拼出的 `/v1/backend-api/codex/*` 同样命中) + 不需要 api key (代理不校验客户端凭证, 上游身份一律用本机 OAuth)
 - 已验证的子路径只有 `/usage`; `/responses`、`/models` 走上表正式端点即可 (带本地转换 + 方言归一)
 - 上游是 Codex CLI 私有后端, 无公开文档: 路径与响应形状随时可能变, 本口只保证转发, 不保证上游长期可用
@@ -127,9 +136,8 @@ src/reqlog.rs                  往返记录: 一行一次 req/res + 按天分文
 src/{auth,oauth,store}.rs      凭证内存态 / 到期预判 / 单飞刷新; PKCE + 本机回调 + 两家 token 换取·刷新; auth.json 原子写 0600
 src/provider.rs                协议面 <-> 端口 / 订阅映射 + 两家上游常量 (client_id / endpoint / CLI 冒充参数)
 src/webui.rs + webui/app.html  浏览器查看器: 只读接口 (日期 / 增量索引 / 整行原文) + 状态 + 服务操作; 前端单文件 include_str! 进二进制, 零外部资源
-scripts/install.sh             安装器: 装 /Applications + 链接终端命令 + 摘 quarantine; 无本地 bundle (curl | bash) 时按本机架构拉最新 release
-scripts/install-local.sh       本机预部署总入口 = 本机架构构建 + 装机 (→ workflow.md)
-scripts/make-dist.sh           分发打包: arm64 / x86_64 各构建一套 -> dist/ 下 tar.gz + dmg + install.sh + SHA256SUMS + release notes
+scripts/install-local.sh       本机预部署总入口 = 本机架构构建 + 装 /Applications + 链接终端命令 (→ workflow.md); 只给开发用, 用户侧不跑脚本
+scripts/make-dist.sh           分发打包: arm64 / x86_64 各构建一套 -> dist/ 下 dmg + SHA256SUMS + release notes
 .github/workflows/release.yml  打 tag 即发版: 验证 + 跑 make-dist.sh + 产物传 GitHub Release (CI 是脚本的薄壳, 本机可复现)
 
 app/                           macOS 查看器 app: SwiftPM + AppKit (macOS 13+, 零第三方依赖); package.sh 组装 bundle, Resources/ 存 Info.plist.in (`@VERSION@` 占位)
@@ -139,5 +147,6 @@ app/Sources/jj-agentic-proxy/
   TrafficRecord.swift + TrafficReader.swift            行首摘要解析 + 日期枚举 / 增量索引 / 按 (offset, length) 现取全文
   ConsoleWindowController.swift + CommandRunner.swift  CLI 控制台面板 + 子进程输出实时回吐
   main.swift + AppDelegate.swift + MainMenu.swift      入口 (`--snapshot <png>` 界面自检) / 主窗口 + 尺寸持久化 / 主菜单
+  CLIInstall.swift                                     终端命令入口: 打开 app 时检查 ~/.local/bin symlink, 缺则弹窗一键建 + 摘 quarantine + `--version` 自检
   ProxyPaths.swift                                     CLI 定位 (首选自身同目录那份) / 日志目录
 ```
