@@ -14,10 +14,12 @@
 
 ## 安装
 
-- macOS only; 无预编译分发, 本机构建后装入 `~/.local/bin/jj-agentic-proxy` (见 [workflow.md](./workflow.md))
+- macOS only; 无预编译分发, 本机构建后装入 `/Applications/jj-agentic-proxy.app` (见 [workflow.md](./workflow.md))
+- CLI 二进制在 app 包体内 (`Contents/MacOS/jj-agentic-proxy-cli`); `~/.local/bin/jj-agentic-proxy` 只是指过去的 symlink -> 升级只装 app, CLI 与 app 永不版本错位
 - `~/.local/bin` 需在 `PATH`: `export PATH="$HOME/.local/bin:$PATH"`
+- 只有一份副本: 删掉 app 则 CLI 一起没了; 安装中途失败会留断链 -> 重跑安装即恢复
 - 浏览器查看器无需安装: 随代理进程一起起来, 开 `http://127.0.0.1:10020`
-- macOS 查看器 app 装入 `/Applications/jj-agentic-proxy.app` (同一份 [workflow.md](./workflow.md))
+- macOS 查看器 = 同一个 bundle 的主程序, 双击 app 即用
 
 ## 使用
 
@@ -51,7 +53,7 @@ jj-agentic-proxy logout all       # anthropic | codex | all
 - 监听 v4 + v6 全网卡: 本机用 `127.0.0.1` / `localhost`, 局域网其他主机用本机 LAN IP (同端口); `start` / `status` 直接打印该 LAN 入口
 - 四个端口一起 bind 且早于就绪标记: 任一被占即整体启动失败, 不留「代理能用但看不见流量」的半残状态
 - 无鉴权 -> 能连到这些端口的主机即可用本机订阅、读全部往返记录 (含原样授权头); 仅限可信内网, 端口 MUST NOT 经路由器映射到公网
-- macOS 应用防火墙开着时首次启动会弹「是否允许接受传入网络连接」, 选允许; 静默拒绝会表现为局域网连不上而本机正常
+- macOS 应用防火墙开着时首次启动会弹「是否允许接受传入网络连接」, 选允许; 静默拒绝会表现为局域网连不上而本机正常 (二进制换到新路径后会再问一次, 比如首次改用 app 包体内那份)
 - 10011 与 10012 同一份 Claude 订阅凭证, 只是协议转换发生在本地还是上游
 - 请求打到哪个端口就走哪家订阅, 与 model 名无关; 路径走错端口时 404 直接给出正确端口
 - base url 带不带 `/v1` 后缀都通, 三个协议端口一律如此: `http://<host>:10010` (Anthropic SDK 约定) 与 `http://<host>:10010/v1` (OpenAI SDK 约定, 也是多数客户端 placeholder 的写法) 等价; 客户端重复拼出的 `/v1/v1/...` 一并归一
@@ -191,10 +193,10 @@ src/provider.rs           协议面 <-> 端口 / 订阅映射 + 两家上游常�
 src/store.rs              auth.json 读写 (原子 + 0600)
 src/webui.rs              浏览器查看器后端: 只读接口 (日期 / 增量索引 / 整行原文) + 状态 + 服务操作
 src/webui/app.html        浏览器查看器前端: 单文件 (include_str! 进二进制), 零外部资源
-scripts/install-local.sh  预部署总入口: CLI release 构建 + 安装 -> 续跑 app/package.sh (`--cli-only` 只装 CLI)
+scripts/install-local.sh  预部署总入口: 跑 app/package.sh -> 把 ~/.local/bin/jj-agentic-proxy 链到包体内 CLI
 
 app/Package.swift         macOS 查看器 app: SwiftPM executable (macOS 13+, AppKit)
-app/package.sh            Release 构建 + 组装 .app + ad-hoc 签名 + 装 /Applications (版本取自 Cargo.toml; 被 install-local.sh 调用)
+app/package.sh            CLI + viewer Release 构建 + 组装 .app (CLI 进 Contents/MacOS) + ad-hoc 签名 + 装 /Applications (版本取自 Cargo.toml)
 app/Resources/            bundle 模板 (Info.plist.in, `@VERSION@` 占位)
 app/Sources/jj-agentic-proxy/
   main.swift              入口 + `--snapshot <png>` 界面自检
@@ -207,5 +209,5 @@ app/Sources/jj-agentic-proxy/
   TrafficReader.swift     日期枚举 + 增量索引 + 按 (offset, length) 现取全文 (原始报文 + 核心内容各一份)
   ConsoleWindowController.swift  CLI 控制台面板
   CommandRunner.swift     跑 CLI 子命令 + 输出实时回吐
-  ProxyPaths.swift        CLI / 日志目录定位
+  ProxyPaths.swift        CLI 定位 (首选自身同目录那份) / 日志目录
 ```

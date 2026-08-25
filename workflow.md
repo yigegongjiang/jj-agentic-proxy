@@ -12,15 +12,15 @@
 - `gh`: 已登录
 - `cargo`: 本机 toolchain; 未登录 crates.io -> 不发布 crate
 - `swift`: 本机 Swift 6.2+ / Xcode 26+ (查看器 app 用 `defaultIsolation`)
-- `scripts/install-local.sh`: 预部署总入口; CLI 装 `~/.local/bin` -> 续跑 `app/package.sh`; `--cli-only` 只装 CLI
-- `app/package.sh`: app 本机构建 + 装入 `/Applications` (被上者调用, 也可单跑)
+- `scripts/install-local.sh`: 预部署总入口; 调 `app/package.sh` -> 建 `~/.local/bin/jj-agentic-proxy` symlink 指向包体内 CLI
+- `app/package.sh`: CLI + viewer 本机构建 -> 组装 bundle -> 签名 -> 装 `/Applications` (被上者调用, 也可单跑)
 
 # 调试
 
 - CLI 往返记录: `jj-agentic-proxy logs -n 20` 看摘要; 原始行 `jq` 直接读 `~/.config/jj-agentic-proxy/log/<日期>.jsonl`
 - app 快编: `cd app && swift build` -> `./.build/debug/jj-agentic-proxy`
 - app 界面自检 (不需录屏授权): `./.build/debug/jj-agentic-proxy --snapshot /tmp/app.png` -> 离屏渲染主窗口, 直接看 PNG
-- 改完代理行为后先 `./scripts/install-local.sh --cli-only` + `jj-agentic-proxy start` 再打真实请求验证 (start 自带 restart)
+- 改完代理行为后先 `cargo build --release` + `./target/release/jj-agentic-proxy start` 再打真实请求验证: daemon 跟着这份二进制跑, 不碰 `/Applications`; 与已装版共用 pid 文件 + 端口, start 自带 restart -> 不会双实例
 
 # 发布
 
@@ -32,7 +32,7 @@
 
 1. 验证：`cargo fmt --check` + `cargo clippy --all-targets -- -D warnings` + `cargo test` + `cargo build --release` + `swift build -c release`
 2. 写版本：`Cargo.toml` + `Cargo.lock` + `CHANGELOG.md` 同步 (与 tag 一致)
-3. 预部署：`./scripts/install-local.sh` (一条命令装 CLI + app)
+3. 预部署：`./scripts/install-local.sh` (一条命令装 app + 终端入口)
 4. 发布：commit + annotated tag (`-a -m`) + push branch + tag
 
 ## 1. 验证
@@ -56,18 +56,19 @@ cargo build --release
 
 ## 3. 预部署
 
-一条命令装完 CLI (`~/.local/bin`) + app (`/Applications`):
+一条命令装完 app (`/Applications`, CLI 在包体内) + 终端入口 (`~/.local/bin`):
 
 ```bash
 ./scripts/install-local.sh
 ```
 
-- CLI: `cargo build --release` -> 临时文件 -> `mv` 原子替换 `~/.local/bin/jj-agentic-proxy` -> `--version` 自检
-- 只覆盖同名二进制, 不影响目录内其他 `jj-*` CLI
-- app: 续跑 `app/package.sh` -> Release 构建 -> 组装 bundle -> ad-hoc 签名 (DR 钉 identifier-only) -> `pkill` 旧实例 -> `ditto` 到 `/Applications`
-- 验证: 输出的两处版本 (CLI / app) 与本次 tag 一致
+- app: `cargo build --release` + `swift build -c release` -> 组装 bundle (viewer + `Contents/MacOS/jj-agentic-proxy-cli`) -> ad-hoc 签名 (DR 钉 identifier-only, CLI 由 codesign 按 nested code 自动密封) -> `pkill` 旧 viewer -> `ditto` 到 `/Applications`
+- 终端入口: `ln -sfn` 把 `~/.local/bin/jj-agentic-proxy` 指到包体内那份 -> `--version` 自检
+- 只覆盖同名 app / 同名入口, 不影响 `~/.local/bin` 里其他 `jj-*` CLI
+- 验证: 输出的版本与本次 tag 一致
 
-> MUST NOT 改回 `cp` 原地覆盖: macOS 会因代码签名缓存失效直接 `Killed: 9`。
+> MUST NOT 在已装 bundle 内原地替换 CLI 后重签: 改密封资源会连带重写 viewer 的嵌入签名, 代码签名缓存失效 -> `Killed: 9`。整包重建 (`package.sh`) 是唯一升级路径。
+> `pkill` MUST 保持 `-f -x` 精确匹配 viewer 完整路径: 模糊匹配会把包体内 CLI 跑的 daemon 一起杀掉。
 > 旧进程仍在跑时: 装完执行 `jj-agentic-proxy start` 即切到新版本 (start 自带 restart)。
 
 ## 4. 发布
