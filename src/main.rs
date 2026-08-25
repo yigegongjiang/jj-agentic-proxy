@@ -216,6 +216,15 @@ pub(crate) fn print_endpoints() {
     // 用 key() 而非 Display: 宽度说明符对自定义 Display 不生效, 会排不齐。
     for s in Surface::ALL {
         println!("- {:<13} http://{}:{}", s.key(), provider::HOST, s.port());
+        // 逃生口只在 codex 面存在, 且不出现在任何客户端配置里 -> 不在这里提就没人知道。
+        // 中文宽度说明符会排不齐 -> 与「局域网同端口」一样走两空格缩进, 不对列。
+        if s == Surface::Codex {
+            println!(
+                "  透传口: http://{}:{}/backend-api/codex/* (打上游私有端点, 如 /usage 查额度)",
+                provider::HOST,
+                s.port()
+            );
+        }
     }
     println!(
         "- {UI_LABEL:<13} http://{}:{} (浏览器打开看往返记录)",

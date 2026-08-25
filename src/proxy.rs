@@ -397,7 +397,7 @@ fn resolve(surface: Surface, path: &str, query: Option<&str>) -> Option<Target> 
         Surface::Codex => {
             let rest = match sub_path(p, "/responses") {
                 Some(_) => p.to_string(),
-                None => sub_path(path, "/backend-api/codex")?.to_string(),
+                None => sub_path(p, "/backend-api/codex")?.to_string(),
             };
             (provider::CODEX_UPSTREAM, rest)
         }
@@ -932,10 +932,13 @@ mod tests {
             resolved(Surface::Codex, "/v1/responses/compact").url,
             "https://chatgpt.com/backend-api/codex/responses/compact"
         );
-        assert_eq!(
-            resolved(Surface::Codex, "/backend-api/codex/usage").url,
-            "https://chatgpt.com/backend-api/codex/usage"
-        );
+        // 逃生口同样吃 /v1 前缀: base url 写成 .../v1 的客户端拼出来就是这形状
+        for p in ["/backend-api/codex/usage", "/v1/backend-api/codex/usage"] {
+            assert_eq!(
+                resolved(Surface::Codex, p).url,
+                "https://chatgpt.com/backend-api/codex/usage"
+            );
+        }
     }
 
     #[test]

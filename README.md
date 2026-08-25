@@ -8,7 +8,9 @@
 
 # jj-agentic-proxy
 
-本机 agentic proxy: 复用自有订阅 (Claude Pro / ChatGPT Plus), 经 Web OAuth 取 token, 以官方 CLI 身份把 Codex 能力暴露在 `:10010`、Claude Code 能力暴露在 `:10011` (原生 Anthropic) 与 `:10012` (Anthropic 官方 OpenAI 兼容层); 全部端口监听全部网卡 -> 本机与同局域网主机都能连; 经手的 req/res 全量落本机文本日志, 配套查看器两份 (`:10020` 浏览器 + macOS app) 做绑定查看.
+本机 agentic proxy: 把自有订阅 (Claude Pro / ChatGPT Plus) 转成标准 API key 形式 -> 任意 OpenAI / Anthropic 兼容客户端填个 base url + key 就能用订阅额度跑, 不碰 API 计费.
+
+经 Web OAuth 取 token, 以官方 CLI 身份请求上游, 协议差异在本地改写抹平: Codex `:10010`、Claude Code `:10011` (原生 Anthropic) 与 `:10012` (Anthropic 官方 OpenAI 兼容层); 全部端口监听全部网卡 -> 本机与同局域网主机都能连; 经手的 req/res 全量落本机文本日志, 配套查看器两份 (`:10020` 浏览器 + macOS app) 做绑定查看.
 
 ## 安装
 
@@ -52,7 +54,7 @@ jj-agentic-proxy logout all       # anthropic | codex | all
 - macOS 应用防火墙开着时首次启动会弹「是否允许接受传入网络连接」, 选允许; 静默拒绝会表现为局域网连不上而本机正常
 - 10011 与 10012 同一份 Claude 订阅凭证, 只是协议转换发生在本地还是上游
 - 请求打到哪个端口就走哪家订阅, 与 model 名无关; 路径走错端口时 404 直接给出正确端口
-- base url 两家官方写法都通: `http://<host>:10011` (Anthropic SDK 约定) 与 `http://<host>:10011/v1` (OpenAI SDK 约定)
+- base url 带不带 `/v1` 后缀都通, 三个协议端口一律如此: `http://<host>:10010` (Anthropic SDK 约定) 与 `http://<host>:10010/v1` (OpenAI SDK 约定, 也是多数客户端 placeholder 的写法) 等价; 客户端重复拼出的 `/v1/v1/...` 一并归一
 - api key 用 `start` / `status` 打印的那份固定值 (三面通用, 永不过期, 直接复制): 代理不校验它, 上游身份一律用本机 OAuth 凭证 -> 任意非空串通常也行, 但 codex 面的部分客户端 (pi-ai 等) 会在发请求前把 key 当 JWT 本地解析取 `chatgpt_account_id`, 只有这份固定值过得去
 - 全放开 CORS: 浏览器页面可直连, 预检由代理直接应答
 
@@ -67,7 +69,7 @@ jj-agentic-proxy logout all       # anthropic | codex | all
 | `POST /v1/messages/count_tokens` | 10011 | `api.anthropic.com` 同路径 | Anthropic Messages |
 | `POST /v1/responses` | 10010 | `chatgpt.com/backend-api/codex/responses` | OpenAI Responses |
 | `POST /v1/responses/compact` | 10010 | 上游 `/responses/compact` | OpenAI Responses |
-| `ANY /backend-api/codex/*` | 10010 | `chatgpt.com` 同路径 | Codex 原生逃生口 |
+| `ANY /backend-api/codex/*` | 10010 | `chatgpt.com` 同路径 | 原样透传 (见[透传口](#codex-透传口)) |
 | `GET /health` | 全部 | — | 本端口协议面 + 登录状态 + 可用路径 |
 
 - Chat Completions 的上游由端口决定, `model` 只取模型名 (允许 `anthropic/`、`openai/` 前缀)
@@ -77,7 +79,19 @@ jj-agentic-proxy logout all       # anthropic | codex | all
 - 10012 只有 Chat Completions 与模型列表 (原生 Messages 走 10011), 字段支持度以[上游兼容层](https://platform.claude.com/docs/en/api/openai-sdk)为准: 无 `reasoning_content`, `response_format` / `reasoning_effort` / `seed` 等被上游静默忽略
 - `/v1/models` 形状: 10011 带 `x-api-key` / `anthropic-version` -> Anthropic 官方原样; 其余 (含 10010 / 10012) -> OpenAI 列表, 只含本端口订阅的模型
 - 错误一律按方言裹官方信封 (`{"type":"error",...}` / `{"error":{...}}`); 上游已给官方形状则原样透传, 保留 `request-id` 等头
-- 额度查 `10010/backend-api/codex/usage`
+
+## Codex 透传口
+
+`ANY :10010/backend-api/codex/*` -> `chatgpt.com/backend-api/codex/` 同路径. 其余端点都做协议转换, 这个不做: **body 原样不动, 只换上游身份** (本机 OAuth token + Codex CLI header). 用途 = 直接打本地没建模的上游私有端点.
+
+```bash
+curl http://127.0.0.1:10010/backend-api/codex/usage  # 订阅额度: plan_type + rate_limit 窗口 + used_percent
+```
+
+- 与其余端点一样吃 `/v1` 前缀: base url 按 OpenAI SDK 约定写成 `.../v1` 时拼出的 `/v1/backend-api/codex/*` 同样命中
+- 不需要 api key: 与其余端点一样, 代理不校验客户端凭证, 上游身份一律用本机 OAuth
+- 已验证的子路径只有 `/usage`; `/responses`、`/models` 走上表正式端点即可 (带本地转换 + 方言归一)
+- 上游是 Codex CLI 私有后端, 无公开文档: 路径与响应形状随时可能变, 本口只保证转发, 不保证上游长期可用
 
 ## 往返记录
 
