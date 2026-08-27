@@ -35,13 +35,16 @@ else
   PATHS=(target/debug app/.build)
 fi
 
-# 逐项报体积只用于展示。实际回收量按 df 差值算 —— cargo 在 deps/ 与 incremental/ 之间打硬链接,
-# 分目录 du 会把共享块重复计入, 加总出来的数字比真实回收量大。
+# 两个口径都报, 各有偏差, 单看哪个都会误判:
+#   du 加总  —— cargo 在 deps/ 与 incremental/ 之间打硬链接, 共享块被重复计入 -> 偏大
+#   df 差值  —— APFS 有本地快照 / 延迟归还时, 空间不会立刻回到 available -> 偏小
 echo "==> 待清理 (mode=$MODE)"
 found=0
+du_total=0
 for p in "${PATHS[@]}"; do
   if [ -e "$p" ]; then
     printf '    %-56s %s\n' "$p" "$(du -sh "$p" 2>/dev/null | cut -f1)"
+    du_total=$(( du_total + $(du -sk "$p" 2>/dev/null | cut -f1) ))
     found=1
   fi
 done
@@ -64,4 +67,5 @@ after="$(df -k . | awk 'NR==2 {print $4}')"
 
 freed=$(( (after - before) / 1024 ))
 [ "$freed" -ge 0 ] || freed=0   # 清理期间别的进程在写盘, 差值可能为负
-echo "==> 已回收 ${freed} MB (可用空间 $(( after / 1024 / 1024 )) GB)"
+echo "==> 已删除 $(( du_total / 1024 )) MB (du 加总, 硬链接重复计入 -> 偏大)"
+echo "==> df 可用空间 +${freed} MB -> $(( after / 1024 / 1024 )) GB (APFS 快照会延迟归还 -> 偏小)"
