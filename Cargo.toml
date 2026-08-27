@@ -1,6 +1,6 @@
 [package]
 name = "jj-agentic-proxy"
-version = "0.13.0"
+version = "0.13.1"
 edition = "2021"
 rust-version = "1.82"
 description = "本机 agentic proxy: 复用自有订阅, 为其他 app 提供 Anthropic / OpenAI Codex 官方协议端点"
@@ -36,3 +36,15 @@ ruzstd = "0.9"
 
 [profile.release]
 strip = true
+
+# 本仓库没有 lldb 断点调试的流程: debug 产物只服务 clippy / test / 编译期报错。
+# dev 默认 `debug = 2` 在 macOS 上按 split-debuginfo = "unpacked" 落成 target/debug/deps 下
+# 数万个 .o (改前实测 20231 个 / target/debug 7.9G; 改后同工况 256 个 / 565M)。
+# line-tables-only 保住 panic backtrace 的
+# 文件名 + 行号, 其余不生成; 依赖连行号都用不上, 整个关掉。
+# 已经堆起来的产物用 scripts/clean.sh 清。
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

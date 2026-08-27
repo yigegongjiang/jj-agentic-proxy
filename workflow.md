@@ -15,12 +15,14 @@
 - `scripts/install-local.sh`: 本机预部署总入口 = `app/package.sh` + 装 `/Applications` + 链接 `~/.local/bin` + `--version` 自检; 只给开发用 (用户侧安装 = 拖 dmg + 开 app 点「好」, 不跑脚本)
 - `app/package.sh [--arch arm64|x86_64]`: CLI + viewer 单架构构建 -> 组装 bundle -> ad-hoc 签名 -> `app/build/jj-agentic-proxy.app`; 只构建, 不装机
 - `scripts/make-dist.sh [--expect-version X.Y.Z]`: 分发打包 -> `dist/` (arm64 / x86_64 各一个 dmg, 外加 SHA256SUMS + RELEASE_NOTES.md); CI 跑的就是它, 本机原样可复现
+- `scripts/clean.sh [--all] [--dry-run]`: 清本机编译产物; 默认只清 debug 层 (`target/debug` + `app/.build`), 留 cargo release 缓存
 
 # 调试
 
 - CLI 往返记录: `jj-agentic-proxy logs -n 20` 看摘要; 原始行 `jq` 直接读 `~/.config/jj-agentic-proxy/log/<日期>.jsonl`
 - app 快编: `cd app && swift build` -> `./.build/debug/jj-agentic-proxy`
 - app 界面自检 (不需录屏授权): `./.build/debug/jj-agentic-proxy --snapshot /tmp/app.png` -> 离屏渲染主窗口, 直接看 PNG
+- 磁盘吃紧时 `./scripts/clean.sh` (先 `--dry-run` 看体积)
 - 改完代理行为后先 `cargo build --release` + `./target/release/jj-agentic-proxy start` 再打真实请求验证: daemon 跟着这份二进制跑, 不碰 `/Applications`; 与已装版共用 pid 文件 + 端口, start 自带 restart -> 不会双实例
 
 # 发布
@@ -35,7 +37,7 @@
 2. 写版本：`Cargo.toml` + `Cargo.lock` + `CHANGELOG.md` 同步 (与 tag 一致)
 3. 预部署：`./scripts/install-local.sh` (一条命令装 app + 终端入口)
 4. 发布：commit + annotated tag (`-a -m`) + push branch + tag
-5. 验收：GHA `release` 转绿 + Release 资产齐全
+5. 验收 + 清理：GHA `release` 转绿 + Release 资产齐全 -> `./scripts/clean.sh`
 
 ## 1. 验证
 
@@ -100,3 +102,17 @@ gh release view vX.Y.Z   # 资产: arm64/x86_64 各一个 dmg, 外加 SHA256SUMS
 - 终端命令入口由 app 自己建 (`CLIInstall.swift`: 打开时弹窗 -> `~/.local/bin` symlink + 摘 quarantine): 发布资产内 MUST NOT 再夹带安装脚本
 - MUST NOT 改回 universal 包: 包体内混进另一架构的 slice 会让 macOS 26.4+ 弹「Support Ending for Intel-based Apps」
 - 干跑不发版: Actions 页手动触发 `release` (workflow_dispatch) -> 只出 workflow artifact
+
+## 6. 清理
+
+```bash
+./scripts/clean.sh               # 清 target/debug + app/.build, 留 cargo release 缓存
+./scripts/clean.sh --dry-run     # 只报体积, 含仓库外的 cargo / swiftpm 缓存
+./scripts/clean.sh --all         # 连 release + 交叉编译 target + 包体 + dmg 一起清
+```
+
+必须排在步骤 3 之后: 提前清会让预部署付一次冷 release 构建。
+
+> 默认档删掉整个 `app/.build`, Swift 侧 (含 release) 一并冷编; cargo release 缓存留着。
+> `--all` 之后下一次 `install-local.sh` / `make-dist.sh` 全冷启, 双架构 dmg 尤其久。
+> 脚本认不出仓库根 (`Cargo.toml` 里没有 `name = "jj-agentic-proxy"`) 直接 exit 2, 不接受路径参数 —— 里面全是 `rm -rf`。
