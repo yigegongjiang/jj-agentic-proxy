@@ -253,6 +253,46 @@ pub(crate) async fn list(app: &Arc<App>, p: Provider) -> Vec<Value> {
         .unwrap_or_default()
 }
 
+/// 取 Codex CLI 最新正式版号作版本下限: 与官方 CLI 自己的升级检查同源 (`codex-rs/tui/src/updates.rs`)。
+///
+/// 上游清单里的 `minimal_client_version` 不可信 (实测 gpt-6.1-sol 标 0.153.0, 实际 0.159.0 起才列出),
+/// 按真实发版号报才与「已升到最新的官方 CLI」一致。未登录 Codex / 网络不通时静默跳过。
+pub(crate) async fn learn_codex_latest(app: &Arc<App>) {
+    if app.auth.snapshot(Provider::Codex).await.is_none() {
+        return;
+    }
+    let sent = app
+        .http
+        .get(provider::CODEX_LATEST_RELEASE_URL)
+        // GitHub API 拒绝不带 UA 的请求
+        .header("user-agent", provider::codex_user_agent())
+        .header("accept", "application/vnd.github+json")
+        // GitHub 不通时别拖住 `models` 命令: 拿不到就维持现有版本号
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await;
+    let resp = match sent {
+        Ok(r) if r.status().is_success() => r,
+        Ok(r) => {
+            tracing::warn!(status = r.status().as_u16(), "Codex 最新版本号获取失败");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Codex 最新版本号获取失败");
+            return;
+        }
+    };
+    let Ok(v) = resp.json::<Value>().await else {
+        return;
+    };
+    if let Some(tag) = v.get("tag_name").and_then(Value::as_str) {
+        let version = tag.trim_start_matches("rust-v");
+        if provider::learn_codex_latest(version) {
+            tracing::info!(version, "Codex 版本下限已更新");
+        }
+    }
+}
+
 fn entries(v: &Value, list_key: &str, id_key: &str, owner: &str) -> Vec<Value> {
     v.get(list_key)
         .and_then(Value::as_array)

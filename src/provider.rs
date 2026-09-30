@@ -192,13 +192,18 @@ pub fn codex_redirect_uri() -> String {
 /// 兜底常量只是下限, 会随时间失效, 因此优先跟随本机 codex CLI 自报的最新版本。
 const CODEX_CLI_VERSION_FLOOR: &str = "0.146.0";
 
-/// 取 内置下限 / 本机 codex 各处自报版本 中最新的一个, 按 `VERSION_TTL` 重读。
+/// 取 内置下限 / 本机 codex 各处自报版本 / Codex 最新发版号 中最新的一个, 按 `VERSION_TTL` 重读。
 ///
 /// 实测坑: 启动时读一次就冻结 -> daemon 连跑数周后本机 CLI 早已升级, 上游按旧版本号拒新模型。
+/// 本机没装 codex (只装了本 app) 时前两项都没有, 靠 `learn_codex_latest` 取到的最新发版号不掉队
+/// (实测: 按 0.146.0 请求, 清单里 gpt-6 系列整批消失; gpt-6.1-sol 要 0.159.0 起)。
 pub fn codex_cli_version() -> String {
-    static CACHE: VersionCache = VersionCache::new();
-    CACHE.get(|| {
+    CODEX_VERSION.get(|| {
         let home = codex_home();
+        let learned = LEARNED_CODEX_FLOOR
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         newest([
             Some(CODEX_CLI_VERSION_FLOOR.to_string()),
             // 已装版本 (模型缓存按它请求上游); version.json 是「可升级到」的版本, 常落后于已装
@@ -206,8 +211,28 @@ pub fn codex_cli_version() -> String {
                 .and_then(|h| json_str(&h.join("models_cache.json"), "client_version")),
             home.as_ref()
                 .and_then(|h| json_str(&h.join("version.json"), "latest_version")),
+            learned,
         ])
     })
+}
+
+static CODEX_VERSION: VersionCache = VersionCache::new();
+static LEARNED_CODEX_FLOOR: Mutex<Option<String>> = Mutex::new(None);
+
+/// 官方 CLI 升级检查用的同一个端点; tag 形如 `rust-v0.159.2`。
+pub const CODEX_LATEST_RELEASE_URL: &str =
+    "https://api.github.com/repos/openai/codex/releases/latest";
+
+/// 记下最新发版号并让缓存立即失效; 形状不对 (非 `X.Y.Z`) 不采纳。返回是否采纳。
+pub fn learn_codex_latest(version: &str) -> bool {
+    if semver_key(version).is_none() {
+        return false;
+    }
+    *LEARNED_CODEX_FLOOR
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(version.to_string());
+    CODEX_VERSION.clear();
+    true
 }
 
 fn codex_home() -> Option<PathBuf> {
@@ -235,6 +260,10 @@ impl VersionCache {
         Self(Mutex::new(None))
     }
 
+    fn clear(&self) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
     fn get(&self, compute: impl FnOnce() -> String) -> String {
         let mut slot = self.0.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((at, v)) = slot.as_ref() {
@@ -249,7 +278,7 @@ impl VersionCache {
 }
 
 /// `X.Y.Z` 按数值比较取最大 (字典序会把 0.99 排在 0.159 之后); 解析不了的忽略。
-fn newest(candidates: impl IntoIterator<Item = Option<String>>) -> String {
+pub fn newest(candidates: impl IntoIterator<Item = Option<String>>) -> String {
     candidates
         .into_iter()
         .flatten()

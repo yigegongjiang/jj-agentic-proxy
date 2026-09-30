@@ -136,7 +136,10 @@ pub fn stream_response(
                 }));
             }
         }
-        yield Ok(Bytes::from_static(b"data: [DONE]\n\n"));
+        // 出错时不补 [DONE]: 它是「正常收尾」信号, 补上会让不解析 error 帧的客户端把残缺回复当完整结果
+        if finished && !failed {
+            yield Ok(Bytes::from_static(b"data: [DONE]\n\n"));
+        }
     });
 
     Response::builder()
@@ -385,6 +388,18 @@ fn new_id() -> String {
 
 // ---------- 两家共用的小工具 ----------
 
+/// 工具结果带图 (截图类工具) -> 两家上游都收块数组; 纯文本仍按字符串送, 形状与以往一致。
+pub(crate) fn has_image(content: &Value) -> bool {
+    content.as_array().is_some_and(|parts| {
+        parts.iter().any(|p| {
+            matches!(
+                p.get("type").and_then(Value::as_str),
+                Some("image_url" | "image" | "input_image")
+            )
+        })
+    })
+}
+
 /// content 取纯文本: string 原样, 数组拼接其中的文本片段。
 pub(crate) fn text_of(v: &Value) -> String {
     match v {
@@ -508,6 +523,6 @@ mod tests {
         let body = String::from_utf8_lossy(&body);
         assert!(body.contains("上游流在完成事件前结束"));
         assert!(!body.contains("\"finish_reason\":\"stop\""));
-        assert!(body.ends_with("data: [DONE]\n\n"));
+        assert!(!body.contains("[DONE]"));
     }
 }

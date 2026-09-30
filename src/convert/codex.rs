@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use serde_json::{json, Map, Value};
 
-use super::{messages, text_of, tool_def, Delta, Translate};
+use super::{has_image, messages, text_of, tool_def, Delta, Translate};
 use crate::sse;
 
 // ---------- 请求: chat -> responses ----------
@@ -33,10 +33,15 @@ pub fn request(req: &Value, model: &str) -> Value {
                     Some(id) if !id.is_empty() => id.to_string(),
                     _ => unpaired.pop_front().unwrap_or_else(|| mint(&mut minted)),
                 };
+                let output = if has_image(content) {
+                    user_content(content)
+                } else {
+                    json!(text_of(content))
+                };
                 input.push(json!({
                     "type": "function_call_output",
                     "call_id": call_id,
-                    "output": text_of(content),
+                    "output": output,
                 }));
             }
             "assistant" => {
@@ -398,6 +403,25 @@ mod tests {
         assert_eq!(out["tool_choice"], json!({"type":"function","name":"f"}));
         assert!(out.get("max_output_tokens").is_none());
         assert!(out.get("max_tokens").is_none());
+    }
+
+    /// 截图类工具的结果带图: 上游 function_call_output 收块数组 (实测 200 且模型认得出图)。
+    #[test]
+    fn tool_result_image_is_forwarded() {
+        let req = json!({"messages": [
+            {"role":"tool","tool_call_id":"c1","content":[
+                {"type":"text","text":"shot"},
+                {"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}
+            ]},
+        ]});
+        let out = request(&req, "gpt-5.5");
+        assert_eq!(
+            out["input"][0]["output"],
+            json!([
+                {"type":"input_text","text":"shot"},
+                {"type":"input_image","image_url":"data:image/png;base64,AAAA"}
+            ])
+        );
     }
 
     #[test]

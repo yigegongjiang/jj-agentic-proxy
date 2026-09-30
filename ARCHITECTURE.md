@@ -115,7 +115,7 @@ curl http://127.0.0.1:10010/backend-api/codex/usage  # 订阅额度: plan_type +
   - 刷新响应不带 `refresh_token` / `expires_in` 时沿用旧 refresh token / 取 access token JWT 的 `exp`
   - 提前量内刷新失败 (旧 token 未过期且非 401 触发) -> WARN + 沿用旧 token; `invalid_grant` 提示重新 login
 - 请求体带 `content-encoding: zstd` (pi-ai 等客户端会压) 一律在入口解开: body 规范化与往返记录都要读明文, 转发给上游恒为未压缩; 其余非 identity 编码直接 400, 好过把压缩字节冒充明文送上去
-- 只提供 HTTP: 带 `Upgrade: websocket` 的请求在端口层直接回 426, 不落透传 (落透传会被上游回 405). 官方 Codex CLI 只在 426 时立即改走 HTTP (`codex-rs/core/src/client.rs` UPGRADE_REQUIRED 分支), 其余状态码先按普通失败重试; pi-ai `transport: auto` 同样回落 SSE
+- 只提供 HTTP: 带 `Upgrade: websocket` 的请求在端口层直接回 426, 不落透传 (落透传会被上游回 405). 官方 Codex CLI 只在 426 时立即改走 HTTP (`codex-rs/core/src/client.rs` UPGRADE_REQUIRED 分支), 其余状态码先按普通失败重试; pi-ai `transport: auto` 握手非 101 一律按传输失败回落 SSE, 与状态码无关 (`packages/ai/src/api/openai-codex-responses.ts`)
 - 透传路径: 注入 Bearer 与官方 CLI header, body 只做上游硬要求的最小改写
   - OAuth 凭证的 system 闸门 (实测): 上游只认 system **首块**且要求与 Claude Code 前缀**逐字节全等**; 前缀与正文同块、多一个尾随换行、前缀排在后面的块里, 一律被拒 —— 且报成 429 `rate_limit_error`, 极易误判为限流
   - Anthropic 原生: 首块不合规就在最前面补一块纯前缀 (不带 `cache_control`, 不占客户端的缓存断点、不打乱 ttl 顺序); 首块之后不受限制 -> 客户端 system 原样保留
@@ -125,11 +125,16 @@ curl http://127.0.0.1:10010/backend-api/codex/usage  # 订阅额度: plan_type +
 - Chat Completions: 双向转换; 上游一律 SSE, 客户端要非流式时本层聚合 -> 只维护一条解析路径
   - finish_reason: Anthropic `model_context_window_exceeded` / Codex `response.incomplete` -> `length` (Codex `incomplete_details.reason: content_filter` -> `content_filter`); Codex `response.refusal.delta` 当正文输出, 不丢
   - `parallel_tool_calls:false` -> Anthropic `tool_choice.disable_parallel_tool_use`; 客户端漏给 tool call id -> 按顺序补 `call_jj<n>` 并与后续 tool 消息配对 (送 null 上游 400); 流内错误保留上游 `code`
+  - tool 消息带图 -> 两家都按块数组送 (Codex `function_call_output.output` 收 `input_text`/`input_image`, 实测 200 且模型认得出图; Anthropic `tool_result.content` 收 text/image 块); 纯文本仍送字符串
+  - 流出错 / 未收到完成事件 -> 只发 error 帧, 不补 `[DONE]`: 它是正常收尾信号, 补上会让不解析 error 帧的客户端把残缺回复当完整结果
 - 上游错误重裹成方言信封时保留 `retry-after` / `request-id` / `x-request-id`
 - CLI 渠道与官方 api key 渠道的差异由代理抹平: 上游硬拒 `stream:false` 与字符串 `input`, 代理补齐后再把 SSE 聚合成官方非流式对象
 - 响应逐块转发不缓冲 -> SSE 首字延迟与官方 CLI 一致; 请求体无大小上限
 - 上游重试 (`proxy::upstream`, 总次数 ≤ 3 含 401 续期): 仅在响应头阶段 (客户端尚未收到字节) 对 408 / 500 / 502 / 503 / 504 / 529 与建连失败重试, 退避 1s / 2s, `retry-after` ≤ 8s 时听上游; 429 不重试 (订阅额度窗口, 实测 `retry-after` 226s 起); 请求发出后的超时 / 断开不重放 (上游可能已计费); 流开始后的中断原样交给客户端
-- 上游按 Codex CLI 版本 gate 新模型: 版本号 = max(内置下限, `~/.codex/models_cache.json` `client_version` (已装版本), `version.json` `latest_version`), 每 10 分钟重读. 实测坑: 启动时读一次即冻结, daemon 长跑后被上游按旧版本拒新模型
+- 上游按 Codex CLI 版本 gate 新模型: 版本号 = max(内置下限, `~/.codex/models_cache.json` `client_version` (已装版本), `version.json` `latest_version`, GitHub `openai/codex` 最新正式版), 每 10 分钟重读
+  - 实测坑: 启动时读一次即冻结, daemon 长跑后被上游按旧版本拒新模型; 按 0.146.0 请求时 gpt-6 系列整批不列
+  - 最新正式版 = 官方 CLI 升级检查同源 (`releases/latest`, tag `rust-vX.Y.Z`), daemon 启动取一次后每小时一次, 5s 超时, 未登录 Codex 不取 -> 本机没装 codex 也不掉队
+  - 不用上游清单的 `minimal_client_version`: 实测不可信 (gpt-6.1-sol 标 0.153.0, 实际 0.159.0 起才列出)
 - Claude UA `claude-cli/<ver>` 同理跟随 `~/.local/share/claude/versions/` 最新目录名 (原生安装器), 找不到回落下限 2.1.88; 上游目前不校验该版本 (实测 2.1.88 与 2.1.285 均 200 + `representative-claim: five_hour`)
 - 零配置: 无任何自定义 env / 参数 (端口、路径、身份全部内置); 只认标准 `RUST_LOG` 调日志
 

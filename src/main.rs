@@ -143,6 +143,15 @@ async fn serve() -> Result<()> {
 
     daemon::mark_ready(&mut instance)?;
 
+    // 上游随新模型抬高最低客户端版本 -> 启动即取一次最新发版号, 之后每小时一次 (本机没装 codex 时唯一的跟进途径)
+    let probe_app = app.clone();
+    tokio::spawn(async move {
+        loop {
+            server::learn_codex_latest(&probe_app).await;
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        }
+    });
+
     for (label, task) in tasks {
         task.await
             .with_context(|| format!("{label} 端口任务异常"))?
@@ -311,6 +320,7 @@ async fn models() -> Result<()> {
         http,
         session_id: new_session_id(),
     });
+    server::learn_codex_latest(&app).await;
     for p in Provider::ALL {
         let ports = Surface::ALL
             .iter()

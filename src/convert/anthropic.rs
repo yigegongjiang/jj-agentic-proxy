@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use serde_json::{json, Map, Value};
 
-use super::{max_tokens, messages, text_of, tool_def, Delta, Translate};
+use super::{has_image, max_tokens, messages, text_of, tool_def, Delta, Translate};
 use crate::sse;
 
 /// Anthropic 的 max_tokens 必填; 客户端没给时的兜底。
@@ -34,7 +34,11 @@ pub fn request(req: &Value, model: &str) -> Value {
                 vec![json!({
                     "type": "tool_result",
                     "tool_use_id": m.get("tool_call_id").cloned().unwrap_or(Value::Null),
-                    "content": text_of(content),
+                    "content": if has_image(content) {
+                        json!(user_blocks(content))
+                    } else {
+                        json!(text_of(content))
+                    },
                 })],
             ),
             "assistant" => {
