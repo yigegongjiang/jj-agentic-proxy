@@ -1,11 +1,12 @@
 //! 两家上游的固定事实 (client_id / endpoint / 冒充参数)。
 //!
 //! 值来源: openai/codex `codex-rs/login`, Claude Code CLI OAuth 流程。
-//! 会随上游演进的版本号一律可用 env 覆盖, 避免硬编码衰减。
+//! 会随上游演进的 CLI 版本号跟随本机安装周期重读, 内置值只作下限, 避免硬编码衰减。
 
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// loopback 面: 必须绑到, 绑不上即判定端口被占。
 pub const BIND_LOOPBACK: &str = "127.0.0.1";
@@ -137,8 +138,32 @@ pub fn anthropic_redirect_uri() -> String {
     format!("http://localhost:{ANTHROPIC_CALLBACK_PORT}{ANTHROPIC_CALLBACK_PATH}")
 }
 
-/// 上游只校验客户端身份 (OAuth + system 前缀), 不校验 claude-cli 版本 -> 固定值即可。
-pub const CLAUDE_USER_AGENT: &str = "claude-cli/2.1.88 (external, cli)";
+/// 上游目前只校验客户端身份 (OAuth + system 前缀), 不校验 claude-cli 版本 (实测 2.1.88 可用);
+/// 但 Codex 那边已出现按 CLI 版本 gate 新模型 -> 同样跟随本机 CLI, 内置值只作下限。
+const CLAUDE_CLI_VERSION_FLOOR: &str = "2.1.88";
+
+/// `claude-cli/<ver> (external, cli)`
+pub fn claude_user_agent() -> String {
+    static CACHE: VersionCache = VersionCache::new();
+    let ver = CACHE.get(|| {
+        newest([
+            Some(CLAUDE_CLI_VERSION_FLOOR.to_string()),
+            local_claude_version(),
+        ])
+    });
+    format!("claude-cli/{ver} (external, cli)")
+}
+
+/// 原生安装器把每个版本解到 `~/.local/share/claude/versions/<ver>`; 取其中最新的。
+/// npm 全局安装等其他方式找不到 -> 回落下限。
+fn local_claude_version() -> Option<String> {
+    let dir = PathBuf::from(std::env::var("HOME").ok()?).join(".local/share/claude/versions");
+    let names = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok()?.file_name().into_string().ok());
+    let v = newest(names.map(Some));
+    (!v.is_empty()).then_some(v)
+}
 
 // ---------- OpenAI Codex CLI ----------
 
@@ -167,26 +192,80 @@ pub fn codex_redirect_uri() -> String {
 /// 兜底常量只是下限, 会随时间失效, 因此优先跟随本机 codex CLI 自报的最新版本。
 const CODEX_CLI_VERSION_FLOOR: &str = "0.146.0";
 
-/// 优先级: 本机 codex CLI 版本 > 内置下限 (仅 version.json 读取失败时兜底)。
+/// 取 内置下限 / 本机 codex 各处自报版本 中最新的一个, 按 `VERSION_TTL` 重读。
+///
+/// 实测坑: 启动时读一次就冻结 -> daemon 连跑数周后本机 CLI 早已升级, 上游按旧版本号拒新模型。
 pub fn codex_cli_version() -> String {
-    static VERSION: OnceLock<String> = OnceLock::new();
-    VERSION
-        .get_or_init(|| {
-            local_codex_version().unwrap_or_else(|| CODEX_CLI_VERSION_FLOOR.to_string())
-        })
-        .clone()
+    static CACHE: VersionCache = VersionCache::new();
+    CACHE.get(|| {
+        let home = codex_home();
+        newest([
+            Some(CODEX_CLI_VERSION_FLOOR.to_string()),
+            // 已装版本 (模型缓存按它请求上游); version.json 是「可升级到」的版本, 常落后于已装
+            home.as_ref()
+                .and_then(|h| json_str(&h.join("models_cache.json"), "client_version")),
+            home.as_ref()
+                .and_then(|h| json_str(&h.join("version.json"), "latest_version")),
+        ])
+    })
 }
 
-/// 本机 codex CLI 把最新版本号写进 `$CODEX_HOME/version.json`, 随其自动更新。
-fn local_codex_version() -> Option<String> {
-    let home = match std::env::var("CODEX_HOME") {
-        Ok(dir) => PathBuf::from(dir),
-        Err(_) => PathBuf::from(std::env::var("HOME").ok()?).join(".codex"),
-    };
-    let bytes = std::fs::read(home.join("version.json")).ok()?;
+fn codex_home() -> Option<PathBuf> {
+    match std::env::var("CODEX_HOME") {
+        Ok(dir) if !dir.is_empty() => Some(PathBuf::from(dir)),
+        _ => Some(PathBuf::from(std::env::var("HOME").ok()?).join(".codex")),
+    }
+}
+
+fn json_str(path: &std::path::Path, key: &str) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
     let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    let version = value.get("latest_version")?.as_str()?;
-    (!version.is_empty()).then(|| version.to_string())
+    let v = value.get(key)?.as_str()?;
+    (!v.is_empty()).then(|| v.to_string())
+}
+
+/// 本机 CLI 版本重读间隔: 升级后最迟这么久跟上, 又不至于每个请求都读盘。
+const VERSION_TTL: Duration = Duration::from_secs(600);
+
+/// 按 TTL 重算的版本号缓存。
+struct VersionCache(Mutex<Option<(Instant, String)>>);
+
+impl VersionCache {
+    const fn new() -> Self {
+        Self(Mutex::new(None))
+    }
+
+    fn get(&self, compute: impl FnOnce() -> String) -> String {
+        let mut slot = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, v)) = slot.as_ref() {
+            if at.elapsed() < VERSION_TTL {
+                return v.clone();
+            }
+        }
+        let v = compute();
+        *slot = Some((Instant::now(), v.clone()));
+        v
+    }
+}
+
+/// `X.Y.Z` 按数值比较取最大 (字典序会把 0.99 排在 0.159 之后); 解析不了的忽略。
+fn newest(candidates: impl IntoIterator<Item = Option<String>>) -> String {
+    candidates
+        .into_iter()
+        .flatten()
+        .filter_map(|v| semver_key(&v).map(|k| (k, v)))
+        .max_by(|a, b| a.0.cmp(&b.0))
+        .map(|(_, v)| v)
+        .unwrap_or_default()
+}
+
+fn semver_key(v: &str) -> Option<[u64; 3]> {
+    let mut parts = v.trim().split('.');
+    let mut key = [0u64; 3];
+    for slot in &mut key {
+        *slot = parts.next()?.parse().ok()?;
+    }
+    parts.next().is_none().then_some(key)
 }
 
 /// `codex_cli_rs/<ver> (<os>; <arch>)`
@@ -205,6 +284,18 @@ mod tests {
     use super::*;
     use base64::engine::general_purpose::STANDARD_NO_PAD;
     use base64::Engine as _;
+
+    #[test]
+    fn newest_compares_numerically_and_skips_garbage() {
+        let v = newest([
+            Some("0.99.0".into()),
+            Some("0.159.2".into()),
+            Some("latest".into()),
+            None,
+            Some("0.158.0".into()),
+        ]);
+        assert_eq!(v, "0.159.2");
+    }
 
     /// 客户端拿这个值当 JWT 解析 -> 改坏了只会在客户端侧报错, 这里守住形状。
     #[test]

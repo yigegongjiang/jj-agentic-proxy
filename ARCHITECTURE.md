@@ -36,7 +36,7 @@ MUST NOT 写安装 · 上手 (→ README.md) / 发布流程 (→ workflow.md) / 
 - 采样参数 (`temperature` / `top_p` / `top_k`) 在所有 Anthropic 面 (10011 原生 + 10011/10012 Chat Completions) 一律丢弃: 上游新模型按「键是否存在」硬拒 (400 `` `temperature` is deprecated ``), 与取值无关, 且受限名单随新模型扩张 -> 不做模型名判断
 - 10011 的 Chat Completions 把 `reasoning_effort` 映射成上游现行思考档位
 - 10012 只有 Chat Completions 与模型列表 (原生 Messages 走 10011), 字段支持度以[上游兼容层](https://platform.claude.com/docs/en/api/openai-sdk)为准: 无 `reasoning_content`, `response_format` / `reasoning_effort` / `seed` 等被上游静默忽略
-- `/v1/models` 只在 10011 且请求带 `x-api-key` / `anthropic-version` 时给 Anthropic 官方原样, 其余一律 OpenAI 列表
+- `/v1/models` 只在 10011 且请求带 `x-api-key` / `anthropic-version` 时给 Anthropic 官方原样, 其余一律 OpenAI 列表; Codex 上游标 `visibility: hide` 的内部模型不列
 - 错误一律按方言裹官方信封 (`{"type":"error",...}` / `{"error":{...}}`); 上游已给官方形状则原样透传, 保留 `request-id` 等头
 
 ## Codex 透传口
@@ -109,9 +109,13 @@ curl http://127.0.0.1:10010/backend-api/codex/usage  # 订阅额度: plan_type +
 - `start` 拉起后台进程后等它写下就绪标记才报成功 (不靠「端口通」, 避免把别人占的端口认成自己); `stop` = SIGTERM -> 等锁释放 -> 5s 未退则 SIGKILL
 - 后台日志单文件 8MB 上限, 满则轮转一份 -> 磁盘占用恒定, 不随运行时长增长
 - 认证: OAuth PKCE (S256); 回调端口被上游 client_id allow-list 写死 (Anthropic 54545 / Codex 1455), 登录时须空闲
-- 凭证: `auth.json` 进程间串行 + 原子写 + 0600; login/logout 热更新; 到期前 300s 主动刷新, 每 provider 单飞锁; 上游 401 时强制续期并重试一次
+- 凭证: `auth.json` 进程间串行 + 原子写 + 0600; login/logout 热更新; 到期前 300s 主动刷新; 上游 401 时强制续期并重试一次
+  - 刷新跑在独立 task, 进程内单飞锁随之移交 -> 客户端断开只取消等待, 不中断「换 token -> 落盘」. 实测坑 (09-15 / 08-03): 刷新内联在请求 future 里, 客户端恰在刷新途中断开 -> 上游已轮换 refresh token 而新值未落盘 -> 持续 `invalid_grant` 直到重新 login
+  - 跨进程: daemon 与 `models` 等 CLI 子进程各持进程内锁互不可见 -> 另加 `refresh-<provider>.lock` (flock) 串行刷新, 拿到锁后以盘上为准重判; 不复用 `auth.lock`: 持锁期间要 `put`, flock 按打开的文件描述计, 同一把会自锁
+  - 刷新响应不带 `refresh_token` / `expires_in` 时沿用旧 refresh token / 取 access token JWT 的 `exp`
+  - 提前量内刷新失败 (旧 token 未过期且非 401 触发) -> WARN + 沿用旧 token; `invalid_grant` 提示重新 login
 - 请求体带 `content-encoding: zstd` (pi-ai 等客户端会压) 一律在入口解开: body 规范化与往返记录都要读明文, 转发给上游恒为未压缩; 其余非 identity 编码直接 400, 好过把压缩字节冒充明文送上去
-- 只提供 HTTP: codex 面客户端先试 WebSocket 时 (pi-ai `transport: auto`) 拿到 405 并自动回落 SSE; 客户端直接配 `transport: sse` 可省掉这次试探
+- 只提供 HTTP: 带 `Upgrade: websocket` 的请求在端口层直接回 426, 不落透传 (落透传会被上游回 405). 官方 Codex CLI 只在 426 时立即改走 HTTP (`codex-rs/core/src/client.rs` UPGRADE_REQUIRED 分支), 其余状态码先按普通失败重试; pi-ai `transport: auto` 同样回落 SSE
 - 透传路径: 注入 Bearer 与官方 CLI header, body 只做上游硬要求的最小改写
   - OAuth 凭证的 system 闸门 (实测): 上游只认 system **首块**且要求与 Claude Code 前缀**逐字节全等**; 前缀与正文同块、多一个尾随换行、前缀排在后面的块里, 一律被拒 —— 且报成 429 `rate_limit_error`, 极易误判为限流
   - Anthropic 原生: 首块不合规就在最前面补一块纯前缀 (不带 `cache_control`, 不占客户端的缓存断点、不打乱 ttl 顺序); 首块之后不受限制 -> 客户端 system 原样保留
@@ -119,9 +123,14 @@ curl http://127.0.0.1:10010/backend-api/codex/usage  # 订阅额度: plan_type +
   - Codex: 补 `stream`+`instructions`, 强制 `store:false`, 丢弃上游不认的纯标注参数 (`metadata` / `user` / `safety_identifier` / token 上限)
   - 有语义的参数 (`temperature` / `previous_response_id` / `background` / ...) 不静默丢弃, 由上游报错并归一成官方信封
 - Chat Completions: 双向转换; 上游一律 SSE, 客户端要非流式时本层聚合 -> 只维护一条解析路径
+  - finish_reason: Anthropic `model_context_window_exceeded` / Codex `response.incomplete` -> `length` (Codex `incomplete_details.reason: content_filter` -> `content_filter`); Codex `response.refusal.delta` 当正文输出, 不丢
+  - `parallel_tool_calls:false` -> Anthropic `tool_choice.disable_parallel_tool_use`; 客户端漏给 tool call id -> 按顺序补 `call_jj<n>` 并与后续 tool 消息配对 (送 null 上游 400); 流内错误保留上游 `code`
+- 上游错误重裹成方言信封时保留 `retry-after` / `request-id` / `x-request-id`
 - CLI 渠道与官方 api key 渠道的差异由代理抹平: 上游硬拒 `stream:false` 与字符串 `input`, 代理补齐后再把 SSE 聚合成官方非流式对象
 - 响应逐块转发不缓冲 -> SSE 首字延迟与官方 CLI 一致; 请求体无大小上限
-- 上游按 Codex CLI 版本 gate 新模型: 版本号跟随本机 `~/.codex/version.json` 自动更新, 内置常量只作下限
+- 上游重试 (`proxy::upstream`, 总次数 ≤ 3 含 401 续期): 仅在响应头阶段 (客户端尚未收到字节) 对 408 / 500 / 502 / 503 / 504 / 529 与建连失败重试, 退避 1s / 2s, `retry-after` ≤ 8s 时听上游; 429 不重试 (订阅额度窗口, 实测 `retry-after` 226s 起); 请求发出后的超时 / 断开不重放 (上游可能已计费); 流开始后的中断原样交给客户端
+- 上游按 Codex CLI 版本 gate 新模型: 版本号 = max(内置下限, `~/.codex/models_cache.json` `client_version` (已装版本), `version.json` `latest_version`), 每 10 分钟重读. 实测坑: 启动时读一次即冻结, daemon 长跑后被上游按旧版本拒新模型
+- Claude UA `claude-cli/<ver>` 同理跟随 `~/.local/share/claude/versions/` 最新目录名 (原生安装器), 找不到回落下限 2.1.88; 上游目前不校验该版本 (实测 2.1.88 与 2.1.285 均 200 + `representative-claim: five_hour`)
 - 零配置: 无任何自定义 env / 参数 (端口、路径、身份全部内置); 只认标准 `RUST_LOG` 调日志
 
 ## 结构

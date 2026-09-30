@@ -97,8 +97,14 @@ pub async fn refresh(http: &reqwest::Client, p: Provider, cred: &Credential) -> 
         Provider::Anthropic => anthropic_refresh(http, &cred.refresh_token).await?,
         Provider::Codex => codex_refresh(http, &cred.refresh_token).await?,
     };
-    // 刷新响应可能不带账号信息, 沿用旧值。
+    // 刷新响应可能不带账号信息, 也可能不轮换 refresh token (官方 CLI 该字段就是可选) -> 沿用旧值。
+    let refresh_token = if fresh.refresh_token.is_empty() {
+        cred.refresh_token.clone()
+    } else {
+        fresh.refresh_token
+    };
     Ok(Credential {
+        refresh_token,
         account: fresh.account.or_else(|| cred.account.clone()),
         account_id: fresh.account_id.or_else(|| cred.account_id.clone()),
         plan: fresh.plan.or_else(|| cred.plan.clone()),
@@ -126,7 +132,8 @@ fn anthropic_authorize_url(pkce: &Pkce, state: &str) -> String {
 #[derive(Deserialize)]
 struct AnthropicTokenResp {
     access_token: String,
-    refresh_token: String,
+    #[serde(default)]
+    refresh_token: Option<String>,
     #[serde(default)]
     expires_in: Option<u64>,
     #[serde(default)]
@@ -149,7 +156,7 @@ impl From<AnthropicTokenResp> for Credential {
         };
         Credential {
             access_token: r.access_token,
-            refresh_token: r.refresh_token,
+            refresh_token: r.refresh_token.unwrap_or_default(),
             expires_at: now().saturating_add(r.expires_in.unwrap_or(3600)),
             account,
             account_id,
@@ -194,7 +201,7 @@ async fn anthropic_refresh(http: &reqwest::Client, refresh_token: &str) -> Resul
         "client_id": provider::ANTHROPIC_CLIENT_ID,
     });
     let resp = http
-        .post(provider::ANTHROPIC_TOKEN_URL)
+        .post(token_url(provider::ANTHROPIC_TOKEN_URL.to_string()))
         .json(&body)
         .send()
         .await
@@ -233,7 +240,8 @@ fn codex_authorize_url(pkce: &Pkce, state: &str) -> String {
 #[derive(Deserialize)]
 struct CodexTokenResp {
     access_token: String,
-    refresh_token: String,
+    #[serde(default)]
+    refresh_token: Option<String>,
     #[serde(default)]
     id_token: Option<String>,
     #[serde(default)]
@@ -252,10 +260,16 @@ impl From<CodexTokenResp> for Credential {
                 .and_then(|v| v.as_str())
                 .map(str::to_string)
         };
+        // 缺 expires_in 时以 access token 自带的 exp 为准, 猜 3600 只是最后兜底。
+        let expires_at = r
+            .expires_in
+            .map(|s| now().saturating_add(s))
+            .or_else(|| jwt_claims(&r.access_token)?.get("exp")?.as_u64())
+            .unwrap_or_else(|| now().saturating_add(3600));
         Credential {
             access_token: r.access_token,
-            refresh_token: r.refresh_token,
-            expires_at: now().saturating_add(r.expires_in.unwrap_or(3600)),
+            refresh_token: r.refresh_token.unwrap_or_default(),
+            expires_at,
             account: claims
                 .as_ref()
                 .and_then(|c| c.get("email"))
@@ -296,7 +310,7 @@ async fn codex_refresh(http: &reqwest::Client, refresh_token: &str) -> Result<Cr
         "refresh_token": refresh_token,
     });
     let resp = http
-        .post(provider::codex_token_url())
+        .post(token_url(provider::codex_token_url()))
         .json(&body)
         .send()
         .await
@@ -304,6 +318,19 @@ async fn codex_refresh(http: &reqwest::Client, refresh_token: &str) -> Result<Cr
     Ok(json_or_err::<CodexTokenResp>(resp, "Codex token 刷新")
         .await?
         .into())
+}
+
+/// 刷新端点。测试可改指本机假上游, 生产恒为官方地址。
+#[cfg(test)]
+pub(crate) static TOKEN_URL_OVERRIDE: std::sync::Mutex<Option<String>> =
+    std::sync::Mutex::new(None);
+
+fn token_url(official: String) -> String {
+    #[cfg(test)]
+    if let Some(url) = TOKEN_URL_OVERRIDE.lock().unwrap().clone() {
+        return url;
+    }
+    official
 }
 
 pub fn jwt_claims(jwt: &str) -> Option<serde_json::Value> {
@@ -483,7 +510,7 @@ mod tests {
         );
         let cred: Credential = CodexTokenResp {
             access_token: "at".into(),
-            refresh_token: "rt".into(),
+            refresh_token: Some("rt".into()),
             id_token: Some(format!("h.{payload}.s")),
             expires_in: Some(60),
         }

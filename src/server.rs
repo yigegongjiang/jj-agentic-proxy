@@ -32,6 +32,12 @@ pub fn router(port: Port) -> Router {
         .with_state(port)
 }
 
+fn is_websocket_upgrade(h: &HeaderMap) -> bool {
+    h.get(axum::http::header::UPGRADE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.eq_ignore_ascii_case("websocket"))
+}
+
 /// 唯一入口 -> 往返记录只需挂在这里, 所有端口 / 路径 / 错误一并覆盖。
 async fn dispatch(
     state: State<Port>,
@@ -67,6 +73,16 @@ async fn route(
     let openai_list = method == Method::GET && dialect == Dialect::OpenAI;
     // claude-openai 端口的 chat/completions 由 Anthropic 官方兼容层出结果 -> 落透传。
     let local_chat = method == Method::POST && surface != Surface::ClaudeOpenAI;
+
+    // 只提供 HTTP。官方 Codex CLI 仅在握手拿到 426 时立即改走 HTTP (`codex-rs/core/src/client.rs`
+    // 的 UPGRADE_REQUIRED 分支), 其余状态码先按普通失败重试; 落透传还会被上游回成 405。
+    if is_websocket_upgrade(&headers) {
+        return dialect.error(
+            StatusCode::UPGRADE_REQUIRED,
+            "invalid_request",
+            "本代理只提供 HTTP (SSE), 不支持 WebSocket",
+        );
+    }
 
     match path {
         "/health" => proxy::health(state).await,
@@ -242,6 +258,8 @@ fn entries(v: &Value, list_key: &str, id_key: &str, owner: &str) -> Vec<Value> {
         .and_then(Value::as_array)
         .map(|arr| {
             arr.iter()
+                // Codex 后端把内部 / 实验模型标 `visibility: hide` (官方 CLI 的选择器同样不列)
+                .filter(|m| m.get("visibility").and_then(Value::as_str) != Some("hide"))
                 .filter_map(|m| m.get(id_key).and_then(Value::as_str))
                 .map(|id| {
                     json!({

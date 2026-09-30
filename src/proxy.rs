@@ -4,7 +4,7 @@
 
 use std::io::Read as _;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::body::{Body, Bytes};
 use axum::extract::State;
@@ -251,7 +251,15 @@ pub(crate) async fn normalize_error(resp: reqwest::Response, dialect: Dialect) -
                 .find_map(|p| v.pointer(p).and_then(Value::as_str).map(str::to_string))
         })
         .unwrap_or_else(|| String::from_utf8_lossy(&raw).into_owned());
-    dialect.error(status, error_kind(status), &message)
+    let mut out = dialect.error(status, error_kind(status), &message);
+    // 重裹只换 body: SDK 的退避靠 `retry-after`, 排障靠 request id -> 这几个头必须跟着走。
+    for name in ["retry-after", "request-id", "x-request-id"] {
+        if let Some(v) = headers.get(name) {
+            out.headers_mut()
+                .insert(HeaderName::from_static(name), v.clone());
+        }
+    }
+    out
 }
 
 /// 4xx 是请求本身的问题, 5xx 才算上游故障。
@@ -264,7 +272,35 @@ pub(crate) fn error_kind(status: StatusCode) -> &'static str {
     }
 }
 
-/// 带凭证发起上游请求: 到期预判刷新 + 401 强制续期重试一次。
+/// 单次请求打上游的总次数上限 (含 401 续期那一次)。
+const MAX_ATTEMPTS: u8 = 3;
+
+/// 上游瞬时故障: 还没给客户端回任何字节, 换一次通常就好。
+/// 429 不在内: 订阅面的 429 多是额度窗口 (实测 `retry-after` 226s 起), 重试只会白等。
+const RETRY_STATUSES: [u16; 6] = [408, 500, 502, 503, 504, 529];
+
+/// 上游 `retry-after` 超过这个秒数就不在本层等, 原样交给客户端自己决定。
+const MAX_RETRY_WAIT_SECS: u64 = 8;
+
+/// 第 `attempt` 次失败后的等待: 1s / 2s 退避, 上游给了更短的 `retry-after` 就听上游。
+/// `None` = 上游要求等太久, 不重试。
+fn retry_wait(attempt: u8, headers: Option<&reqwest::header::HeaderMap>) -> Option<Duration> {
+    let backoff = Duration::from_secs(1 << (attempt.saturating_sub(1)).min(3));
+    let after = headers
+        .and_then(|h| h.get(reqwest::header::RETRY_AFTER))
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok());
+    match after {
+        Some(secs) if secs > MAX_RETRY_WAIT_SECS => None,
+        Some(secs) => Some(Duration::from_secs(secs)),
+        None => Some(backoff),
+    }
+}
+
+/// 带凭证发起上游请求: 到期预判刷新 + 401 强制续期重试一次 + 瞬时故障有限重试。
+///
+/// 重试只发生在上游响应头阶段, 此时客户端一个字节都没收到 -> 对客户端透明;
+/// 流开始后的中断原样交给客户端 (零缓冲转发的前提)。
 ///
 /// `Err` 已是可直接返回给客户端的错误响应。
 #[allow(clippy::too_many_arguments)]
@@ -282,14 +318,16 @@ pub(crate) async fn upstream(
     dialect: Dialect,
 ) -> Result<reqwest::Response, Response> {
     let mut rejected_token: Option<String> = None;
-    for attempt in 0..2u8 {
+    let mut attempt = 0u8;
+    loop {
+        attempt += 1;
         let cred = match app.auth.token(provider, rejected_token.as_deref()).await {
             Ok(c) => c,
             Err(e) => {
                 return Err(dialect.error(
                     StatusCode::UNAUTHORIZED,
                     "authentication",
-                    &e.to_string(),
+                    &format!("{e:#}"),
                 ))
             }
         };
@@ -298,9 +336,10 @@ pub(crate) async fn upstream(
             Provider::Anthropic => anthropic_headers(&cred.access_token, client, stream),
             Provider::Codex => codex_headers(app, &cred, client, stream),
         };
-        // 注入后的 header 与规范化后的 body 只在这里存在 -> 记录也只能在这里取
+        // 注入后的 header 与规范化后的 body 只在这里存在 -> 记录也只能在这里取 (多次尝试取最后一次)
         crate::reqlog::note_upstream_request(&method, url, &upstream_headers, &body);
 
+        let retry_left = attempt < MAX_ATTEMPTS;
         match app
             .http
             .request(method.clone(), url)
@@ -311,13 +350,34 @@ pub(crate) async fn upstream(
         {
             Ok(resp) => {
                 crate::reqlog::note_upstream_response(resp.status(), resp.headers());
+                let status = resp.status();
                 // 401 = token 失效: 强制续期后重试一次。
-                if resp.status() == StatusCode::UNAUTHORIZED && attempt == 0 {
+                if status == StatusCode::UNAUTHORIZED && rejected_token.is_none() && retry_left {
                     tracing::warn!(provider = %provider, "上游 401, 强制刷新 token 重试");
                     rejected_token = Some(cred.access_token);
                     continue;
                 }
+                if retry_left && RETRY_STATUSES.contains(&status.as_u16()) {
+                    if let Some(wait) = retry_wait(attempt, Some(resp.headers())) {
+                        tracing::warn!(
+                            provider = %provider,
+                            status = status.as_u16(),
+                            attempt,
+                            wait_ms = wait.as_millis() as u64,
+                            "上游瞬时故障, 稍后重试"
+                        );
+                        drop(resp);
+                        tokio::time::sleep(wait).await;
+                        continue;
+                    }
+                }
                 return Ok(resp);
+            }
+            // 只重试建连失败: 请求没出本机, 上游不可能已经计费; 发出后才超时 / 断开的不重放。
+            Err(e) if e.is_connect() && retry_left => {
+                let wait = retry_wait(attempt, None).unwrap_or_default();
+                tracing::warn!(provider = %provider, error = %e, attempt, "上游建连失败, 稍后重试");
+                tokio::time::sleep(wait).await;
             }
             Err(e) => {
                 tracing::error!(provider = %provider, error = %e, "上游请求失败");
@@ -325,12 +385,6 @@ pub(crate) async fn upstream(
             }
         }
     }
-
-    Err(dialect.error(
-        StatusCode::UNAUTHORIZED,
-        "authentication",
-        "上游持续返回 401, 请重新执行 login",
-    ))
 }
 
 // ---------- 路由 ----------
@@ -702,7 +756,7 @@ fn normalize_codex(obj: &mut Map<String, Value>) -> bool {
 fn anthropic_headers(token: &str, client: &HeaderMap, stream: bool) -> HeaderMap {
     let mut h = HeaderMap::new();
     set(&mut h, AUTHORIZATION, &format!("Bearer {token}"));
-    set(&mut h, USER_AGENT, provider::CLAUDE_USER_AGENT);
+    set(&mut h, USER_AGENT, &provider::claude_user_agent());
     set(&mut h, CONTENT_TYPE, "application/json");
     set(&mut h, ACCEPT, accept_for(stream));
     set_name(&mut h, "anthropic-version", provider::ANTHROPIC_API_VERSION);
@@ -1321,6 +1375,98 @@ mod tests {
         let v = body_json(out).await;
         assert_eq!(v["request_id"], json!("req_1"));
         assert_eq!(v["error"]["type"], json!("rate_limit_error"));
+    }
+
+    /// 假上游: 按顺序对每个连接回一个 (status, extra headers) 响应。
+    fn scripted_upstream(script: Vec<(u16, &'static str)>) -> String {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for (status, extra) in script {
+                let Ok((mut s, _)) = listener.accept() else {
+                    return;
+                };
+                let _ = s.read(&mut [0u8; 8192]);
+                let body = format!(r#"{{"status":{status}}}"#);
+                let _ = write!(
+                    s,
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\n{extra}\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        format!("http://{addr}/v1/messages")
+    }
+
+    /// 带一份未过期凭证的 App (凭证落在临时目录, 不碰本机真实 auth.json)。
+    async fn test_app(tag: &str) -> (App, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("jj-proxy-test-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        *crate::store::TEST_CONFIG_DIR.lock().unwrap() = Some(dir.clone());
+        let cred = crate::store::Credential {
+            access_token: "at".into(),
+            refresh_token: "rt".into(),
+            expires_at: u64::MAX,
+            account: None,
+            account_id: None,
+            plan: None,
+        };
+        crate::store::put(Provider::Anthropic, &cred).unwrap();
+        let http = reqwest::Client::new();
+        let app = App {
+            auth: AuthManager::load(http.clone()).unwrap(),
+            http,
+            session_id: "s".into(),
+        };
+        (app, dir)
+    }
+
+    async fn call(app: &App, url: &str) -> reqwest::Response {
+        upstream(
+            app,
+            Provider::Anthropic,
+            Method::POST,
+            url,
+            &HeaderMap::new(),
+            Bytes::from_static(b"{}"),
+            false,
+            Dialect::Anthropic,
+        )
+        .await
+        .unwrap_or_else(|_| panic!("upstream 不应返回本地错误"))
+    }
+
+    /// 529 overloaded 在回任何字节前出现 -> 本层重试, 客户端只看到最终的 200。
+    #[tokio::test]
+    async fn transient_upstream_status_is_retried() {
+        let _g = crate::store::TEST_DIR_LOCK.lock().await;
+        let (app, dir) = test_app("retry").await;
+        let url = scripted_upstream(vec![(529, ""), (200, "")]);
+        let resp = call(&app, &url).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        *crate::store::TEST_CONFIG_DIR.lock().unwrap() = None;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 429 = 额度窗口, 重试只会白等 -> 原样交给客户端; retry-after 过长的 503 同理。
+    #[tokio::test]
+    async fn quota_and_long_retry_after_are_not_retried() {
+        let _g = crate::store::TEST_DIR_LOCK.lock().await;
+        let (app, dir) = test_app("noretry").await;
+        let url = scripted_upstream(vec![(429, ""), (200, "")]);
+        assert_eq!(
+            call(&app, &url).await.status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        let url = scripted_upstream(vec![(503, "Retry-After: 120\r\n"), (200, "")]);
+        assert_eq!(
+            call(&app, &url).await.status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        *crate::store::TEST_CONFIG_DIR.lock().unwrap() = None;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     async fn stub(status: u16, body: &str) -> reqwest::Response {

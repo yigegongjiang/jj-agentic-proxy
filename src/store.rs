@@ -42,7 +42,18 @@ pub fn now() -> u64 {
         .unwrap_or(0)
 }
 
+/// 测试用临时目录; 生产恒为 `None`。改它的测试先持 `TEST_DIR_LOCK`, 免得并行测试互相改指。
+#[cfg(test)]
+pub(crate) static TEST_DIR_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[cfg(test)]
+pub(crate) static TEST_CONFIG_DIR: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
 pub fn config_dir() -> PathBuf {
+    #[cfg(test)]
+    if let Some(dir) = TEST_CONFIG_DIR.lock().unwrap().clone() {
+        return dir;
+    }
     let base = std::env::var("XDG_CONFIG_HOME")
         .ok()
         .filter(|dir| !dir.is_empty())
@@ -93,6 +104,34 @@ fn save(store: &Store) -> Result<()> {
     drop(f);
     fs::rename(&tmp, &path).with_context(|| format!("落盘失败: {}", path.display()))?;
     Ok(())
+}
+
+/// 跨进程串行化同一 provider 的 token 刷新, 返回值持有即持锁 (drop = 关 fd = 释放)。
+///
+/// 后台 daemon 与 `models` 等 CLI 子进程各有一把进程内锁, 互相看不见:
+/// 两边同时拿同一个 refresh token 去换, 上游轮换后后到的那份作废。
+/// 与 `auth.lock` 分开: 刷新持锁期间要 `put` 落盘, flock 按打开的文件描述计, 同一把会自锁。
+pub async fn refresh_lock(provider: Provider) -> Result<fs::File> {
+    let path = config_dir().join(format!("refresh-{}.lock", provider.key()));
+    tokio::task::spawn_blocking(move || -> Result<fs::File> {
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        let mut opts = fs::OpenOptions::new();
+        opts.read(true).write(true).create(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            opts.mode(0o600);
+        }
+        let lock = opts
+            .open(&path)
+            .with_context(|| format!("打开刷新锁失败: {}", path.display()))?;
+        fs4::FileExt::lock(&lock).with_context(|| format!("锁定刷新锁失败: {}", path.display()))?;
+        Ok(lock)
+    })
+    .await
+    .context("刷新锁任务异常")?
 }
 
 /// 串行化 read-modify-write, 防止两家 provider 同时刷新时互相覆盖。

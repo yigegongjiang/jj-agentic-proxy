@@ -14,6 +14,9 @@ use crate::sse;
 pub fn request(req: &Value, model: &str) -> Value {
     let mut instructions: Vec<String> = Vec::new();
     let mut input: Vec<Value> = Vec::new();
+    // 客户端漏给 tool call id 时按出现顺序补号并配对; 送 `call_id: null` 上游直接 400。
+    let mut minted = 0usize;
+    let mut unpaired: std::collections::VecDeque<String> = Default::default();
 
     for m in messages(req) {
         let role = m.get("role").and_then(Value::as_str).unwrap_or("user");
@@ -25,11 +28,17 @@ pub fn request(req: &Value, model: &str) -> Value {
                     instructions.push(t);
                 }
             }
-            "tool" | "function" => input.push(json!({
-                "type": "function_call_output",
-                "call_id": m.get("tool_call_id").cloned().unwrap_or(Value::Null),
-                "output": text_of(content),
-            })),
+            "tool" | "function" => {
+                let call_id = match m.get("tool_call_id").and_then(Value::as_str) {
+                    Some(id) if !id.is_empty() => id.to_string(),
+                    _ => unpaired.pop_front().unwrap_or_else(|| mint(&mut minted)),
+                };
+                input.push(json!({
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": text_of(content),
+                }));
+            }
             "assistant" => {
                 let t = text_of(content);
                 if !t.is_empty() {
@@ -44,9 +53,17 @@ pub fn request(req: &Value, model: &str) -> Value {
                     .map_or(&[][..], Vec::as_slice)
                 {
                     let f = call.get("function").unwrap_or(call);
+                    let call_id = match call.get("id").and_then(Value::as_str) {
+                        Some(id) if !id.is_empty() => id.to_string(),
+                        _ => {
+                            let id = mint(&mut minted);
+                            unpaired.push_back(id.clone());
+                            id
+                        }
+                    };
                     input.push(json!({
                         "type": "function_call",
-                        "call_id": call.get("id").cloned().unwrap_or(Value::Null),
+                        "call_id": call_id,
                         "name": f.get("name").cloned().unwrap_or(Value::Null),
                         "arguments": f.get("arguments").and_then(Value::as_str).unwrap_or("{}"),
                     }));
@@ -83,6 +100,11 @@ pub fn request(req: &Value, model: &str) -> Value {
         out.insert("text".into(), json!({ "format": f }));
     }
     Value::Object(out)
+}
+
+fn mint(n: &mut usize) -> String {
+    *n += 1;
+    format!("call_jj{n}")
 }
 
 fn user_content(v: &Value) -> Value {
@@ -221,7 +243,10 @@ impl Translate for Translator {
         let text = |key: &str| v.get(key).and_then(Value::as_str).unwrap_or("").to_string();
 
         match kind {
-            "response.output_text.delta" => vec![Delta::Text(text("delta"))],
+            // 拒答走独立事件; 不接住的话客户端只会看到一条空回复
+            "response.output_text.delta" | "response.refusal.delta" => {
+                vec![Delta::Text(text("delta"))]
+            }
             "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
                 vec![Delta::Reasoning(text("delta"))]
             }
@@ -275,7 +300,10 @@ impl Translate for Translator {
                     out.push(Delta::Usage(u));
                 }
                 let reason = if kind == "response.incomplete" {
-                    "length"
+                    match v["response"]["incomplete_details"]["reason"].as_str() {
+                        Some("content_filter") => "content_filter",
+                        _ => "length",
+                    }
                 } else if self.saw_tool {
                     "tool_calls"
                 } else {
@@ -312,7 +340,12 @@ fn error_of(e: &Value) -> Value {
         .get("message")
         .and_then(Value::as_str)
         .unwrap_or("上游流式错误");
-    json!({ "message": msg, "type": e.get("type").cloned().unwrap_or(json!("upstream_error")) })
+    // 保留 code: 客户端靠它认 `context_length_exceeded` / `rate_limit_exceeded` 等
+    json!({
+        "message": msg,
+        "type": e.get("type").cloned().unwrap_or(json!("upstream_error")),
+        "code": e.get("code").cloned().unwrap_or(Value::Null),
+    })
 }
 
 #[cfg(test)]
@@ -365,6 +398,21 @@ mod tests {
         assert_eq!(out["tool_choice"], json!({"type":"function","name":"f"}));
         assert!(out.get("max_output_tokens").is_none());
         assert!(out.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn missing_tool_call_ids_are_minted_and_paired() {
+        let req = json!({"messages": [
+            {"role":"user","content":"hi"},
+            {"role":"assistant","content":null,"tool_calls":[
+                {"type":"function","function":{"name":"f","arguments":"{}"}}
+            ]},
+            {"role":"tool","content":"42"},
+        ]});
+        let out = request(&req, "gpt-5.5");
+        let call = &out["input"][1]["call_id"];
+        assert!(call.is_string());
+        assert_eq!(&out["input"][2]["call_id"], call);
     }
 
     #[test]

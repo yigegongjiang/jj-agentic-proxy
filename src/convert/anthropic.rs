@@ -100,6 +100,15 @@ pub fn request(req: &Value, model: &str) -> Value {
     if let Some(tc) = tool_choice(req) {
         out.insert("tool_choice".into(), tc);
     }
+    // Chat 的 `parallel_tool_calls:false` 在 Anthropic 落在 tool_choice 上; `none` 不接受该键。
+    if req.get("parallel_tool_calls") == Some(&json!(false)) && out.contains_key("tools") {
+        let tc = out
+            .entry("tool_choice")
+            .or_insert_with(|| json!({ "type": "auto" }));
+        if tc.get("type") != Some(&json!("none")) {
+            tc["disable_parallel_tool_use"] = json!(true);
+        }
+    }
     // OAuth 凭证要求 system 首块带 Claude Code 前缀。
     crate::proxy::inject_claude_code_prefix(&mut out);
     Value::Object(out)
@@ -328,7 +337,8 @@ impl Translate for Translator {
 fn finish_reason(stop: &str) -> &'static str {
     match stop {
         "tool_use" => "tool_calls",
-        "max_tokens" => "length",
+        // 上下文窗口写满同样是「被截断」, 报 stop 会让客户端当成正常结束
+        "max_tokens" | "model_context_window_exceeded" => "length",
         "refusal" => "content_filter",
         _ => "stop",
     }
@@ -385,6 +395,21 @@ mod tests {
         assert_eq!(out["messages"][2]["content"].as_array().unwrap().len(), 2);
         assert_eq!(out["tools"][0]["input_schema"], json!({"type":"object"}));
         assert_eq!(out["tool_choice"], json!({"type":"any"}));
+    }
+
+    #[test]
+    fn serial_tool_calls_map_to_disable_parallel_tool_use() {
+        let req = json!({
+            "messages": [{"role":"user","content":"hi"}],
+            "tools": [{"type":"function","function":{"name":"f","parameters":{"type":"object"}}}],
+            "parallel_tool_calls": false,
+        });
+        let out = request(&req, "claude-sonnet-5");
+        assert_eq!(
+            out["tool_choice"],
+            json!({"type":"auto","disable_parallel_tool_use":true})
+        );
+        assert_eq!(finish_reason("model_context_window_exceeded"), "length");
     }
 
     /// 两个端口的 chat/completions 行为必须一致: codex 侧支持的这两项, anthropic 侧也要有。
