@@ -101,12 +101,20 @@ nonisolated enum TrafficReader {
         }
         defer { try? fh.close() }
         try? fh.seek(toOffset: offset)
-        guard let data = try? fh.read(upToCount: length),
-              let obj = try? JSONSerialization.jsonObject(with: data),
+        guard let data = try? fh.read(upToCount: length) else {
+            return Detail(clientRequest: both("读不到这一行"))
+        }
+        return detail(line: data)
+    }
+
+    /// 整行 JSON -> 两条腿 × 两种读法; 日志文件那行与进行中快照 (`/api/inflight/{id}`) 同形状, 共用这一份。
+    static func detail(line data: Data) -> Detail {
+        guard let obj = try? JSONSerialization.jsonObject(with: data),
               let dict = obj as? [String: Any]
         else {
             return Detail(clientRequest: both("这一行解析失败 (可能正在写入)"))
         }
+        let inflight = (dict["inflight"] as? NSNumber)?.boolValue ?? false
 
         let method = dict["method"] as? String ?? "?"
         let path = dict["path"] as? String ?? "?"
@@ -116,7 +124,7 @@ nonisolated enum TrafficReader {
                 core: CoreContent.request(path: path, body: dict["req"])
             ),
             clientResponse: Leg(
-                raw: http(start: status(dict["status"]), headers: dict["res_headers"], body: dict["res"]),
+                raw: http(start: status(dict["status"], inflight), headers: dict["res_headers"], body: dict["res"]),
                 core: CoreContent.response(path: path, body: dict["res"])
             )
         )
@@ -133,7 +141,7 @@ nonisolated enum TrafficReader {
             core: note + CoreContent.request(path: upURL, body: upBody)
         )
         out.upstreamResponse = both(http(
-            start: status(up["status"]),
+            start: status(up["status"], inflight),
             headers: up["res_headers"],
             body: nil,
             bodyNote: "（上游响应体不单独记录: 透传面与客户端一致, 转换面见 Client 的 Response）"
@@ -144,9 +152,10 @@ nonisolated enum TrafficReader {
     /// 没有第二种读法的腿 (纯提示 / 只有 header): 两个视图给同一份。
     private static func both(_ text: String) -> Leg { Leg(raw: text, core: text) }
 
-    private static func status(_ code: Any?) -> String {
+    private static func status(_ code: Any?, _ inflight: Bool) -> String {
         let n = (code as? NSNumber)?.intValue ?? 0
-        return n == 0 ? "HTTP —  (没等到响应)" : "HTTP \(n)"
+        if n == 0 { return inflight ? "HTTP —  (等待上游响应…)" : "HTTP —  (没等到响应)" }
+        return "HTTP \(n)"
     }
 
     /// 起始行 + header (按名字排序) + 空行 + body -> 就是一段可读的 HTTP 报文。

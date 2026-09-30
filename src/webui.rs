@@ -46,6 +46,8 @@ pub fn router(app: Arc<App>) -> Router {
         // 参数走路径而非 query: axum 的 query 提取要额外开 feature, 这里只有定长标量, 不值当
         .route("/api/scan/{day}/{from}/{seq}", get(scan_api))
         .route("/api/detail/{day}/{offset}/{length}", get(detail_api))
+        .route("/api/inflight", get(inflight_api))
+        .route("/api/inflight/{id}", get(inflight_detail_api))
         .route("/api/models", get(models))
         .route("/api/login", get(login_state))
         .route("/api/login/{provider}", post(login_start))
@@ -210,6 +212,23 @@ async fn detail_api(Path((day, offset, length)): Path<(String, u64, usize)>) -> 
     }
 }
 
+/// 进行中的往返 (还没落盘): 查看器每拍先取这里再扫文件, 按 `id` 去重 -> 交接瞬间不丢不重。
+async fn inflight_api() -> Response {
+    Json(json!({ "records": reqlog::inflight_list() })).into_response()
+}
+
+/// 与 `/api/detail` 同形状的整行快照 (响应体是截至此刻的部分); 已结束 -> 404, 前端改去文件里取。
+async fn inflight_detail_api(Path(id): Path<String>) -> Response {
+    match reqlog::inflight_line(&id) {
+        Some(raw) => (
+            [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
+            raw,
+        )
+            .into_response(),
+        None => fail(StatusCode::NOT_FOUND, "这条已结束"),
+    }
+}
+
 #[derive(Serialize)]
 struct Batch {
     records: Vec<RecordOut>,
@@ -239,6 +258,9 @@ struct RecordOut {
     model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     incomplete: Option<String>,
+    /// 与进行中那条同 id; 旧版本写的行没有
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
 }
 
 fn log_dir() -> PathBuf {
@@ -363,6 +385,7 @@ fn parse_record(line: &[u8], seq: usize, offset: u64) -> Option<RecordOut> {
         res_bytes: num("res_bytes"),
         model: opt("model"),
         incomplete: opt("incomplete"),
+        id: opt("id"),
     })
 }
 

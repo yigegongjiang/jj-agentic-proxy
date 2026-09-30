@@ -1,16 +1,23 @@
 import AppKit
 
 // 主界面 = 往返数据浏览器: 左侧一条往返一行 (新 -> 旧), 右侧上下绑定展示同一条的 Request / Response。
-// 数据源只有 CLI 落下的 ~/.config/jj-agentic-proxy/log/<日期>.jsonl; app 自己不发起任何代理请求。
+// 数据源 = CLI 落下的 ~/.config/jj-agentic-proxy/log/<日期>.jsonl + 查看器端口上还没落盘的进行中记录;
+// app 自己不发起任何代理请求。
 final class MainViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate,
                                 NSSearchFieldDelegate, NSSplitViewDelegate {
     // MARK: 数据
     private var day = ""
     private var all: [TrafficRecord] = [] // 文件顺序: 旧 -> 新
-    private var rows: [TrafficRecord] = [] // 展示顺序: 新 -> 旧
+    private var ids = Set<String>() // all 里出现过的 id: 进行中那条落盘后按 id 去重
+    private var live: [TrafficRecord] = [] // 进行中 (还没落盘), 旧 -> 新
+    private var latestDay = "" // 进行中的记录只会落进最新那天 -> 只在看最新一天时列出
+    private var rows: [TrafficRecord] = [] // 展示顺序: 进行中 (新 -> 旧) 置顶, 再接已完成 (新 -> 旧)
     private var consumed: UInt64 = 0
     private var nextSeq = 0
-    private var selectedSeq: Int?
+    private var selectedKey: String?
+    private var shownLive = false // 详情面板当前展示的是进行中快照
+    private var restoringSelection = false // 程序恢复选中时不当成用户点选 (否则详情整块重读、滚回顶部)
+    private var liveFetching = false
     private var detailToken = 0
     private var scanning = false
     private var followTimer: Timer?
@@ -262,9 +269,15 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
     override func viewDidAppear() {
         super.viewDidAppear()
         guard day.isEmpty else { return }
-        reloadDays(selecting: nil)
         refreshStatus()
         startFollowTimer()
+        // 先取进行中再建索引: 打开 app 时正在跑的那条直接排在首行并选中
+        liveFetching = true
+        Task {
+            self.live = await LiveFeed.list()
+            self.liveFetching = false
+            self.reloadDays(selecting: nil)
+        }
     }
 
     /// 分隔条初始位置只能在真实尺寸已知后放 (viewDidAppear 时 split 还没拿到最终 bounds)。
@@ -282,6 +295,7 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
     /// 列出可用日期 (默认最新一天), 并重建该日索引。
     private func reloadDays(selecting wanted: String?) {
         let days = TrafficReader.days()
+        latestDay = days.first ?? ""
         let target = wanted ?? (days.contains(day) ? day : days.first)
         dayPopup.removeAllItems()
         dayPopup.addItems(withTitles: days.isEmpty ? ["无记录"] : days)
@@ -289,6 +303,7 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         guard let target, days.contains(target) else {
             day = ""
             all = []
+            ids = []
             applyFilter()
             return
         }
@@ -296,35 +311,46 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         if target != day {
             day = target
             all = []
+            ids = []
             consumed = 0
             nextSeq = 0
         }
         scan(reset: true)
     }
 
-    /// `reset` = 从头重建索引; 否则只读文件新追加的那段。
-    private func scan(reset: Bool) {
-        guard !scanning, !day.isEmpty else { return }
+    /// `reset` = 从头重建索引; 否则只读文件新追加的那段。`relist` = 没读到新记录也重排 (进行中那几条每拍在变)。
+    private func scan(reset: Bool, relist: Bool = false) {
+        guard !scanning, !day.isEmpty else {
+            if relist { applyFilter() }
+            return
+        }
         scanning = true
         let target = day
         let from = reset ? 0 : consumed
         let seq = reset ? 0 : nextSeq
         Task.detached(priority: .userInitiated) {
             let batch = TrafficReader.scan(day: target, from: from, startSeq: seq)
-            await MainActor.run { self.apply(batch, day: target, reset: reset || batch.reset) }
+            await MainActor.run {
+                self.apply(batch, day: target, reset: reset || batch.reset, relist: relist)
+            }
         }
     }
 
-    private func apply(_ batch: TrafficReader.Batch, day target: String, reset: Bool) {
+    private func apply(_ batch: TrafficReader.Batch, day target: String, reset: Bool, relist: Bool) {
         scanning = false
         guard target == day else { return } // 期间用户切了日期
         if reset {
             all = batch.records
+            ids = []
         } else if batch.records.isEmpty {
             consumed = batch.consumed
+            if relist { applyFilter() }
             return // 没有新记录: 不动表格, 不打断选中与滚动
         } else {
             all.append(contentsOf: batch.records)
+        }
+        for rec in batch.records {
+            if let id = rec.id { ids.insert(id) }
         }
         consumed = batch.consumed
         nextSeq = batch.nextSeq
@@ -337,20 +363,29 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         let terms = searchField.stringValue.lowercased()
             .split(whereSeparator: { $0 == " " || $0 == "\t" })
             .map(String.init)
-        let matched = terms.isEmpty
-            ? all
-            : all.filter { rec in terms.allSatisfy { rec.haystack.contains($0) } }
-        rows = matched.reversed()
+        let hit = { (rec: TrafficRecord) in terms.allSatisfy { rec.haystack.contains($0) } }
+        // 先取进行中再扫文件 -> 刚落盘那条两边都有: 以文件为准
+        let pending = day.isEmpty || day == latestDay
+            ? live.filter { !ids.contains($0.id ?? "") }
+            : []
+        let done = terms.isEmpty ? all : all.filter(hit)
+        rows = Array(pending.filter(hit).reversed()) + done.reversed()
 
+        restoringSelection = true
         tableView.reloadData()
-        countLabel.stringValue = terms.isEmpty ? "\(all.count) 条" : "\(rows.count) / \(all.count) 条"
+        restoringSelection = false
+        let total = terms.isEmpty ? "\(all.count) 条" : "\(rows.count) / \(all.count + pending.count) 条"
+        countLabel.stringValue = pending.isEmpty ? total : "\(total) · \(pending.count) 进行中"
 
-        // 选中态按 seq 恢复: follow 追加新记录时不会跳走
-        if let seq = selectedSeq, let idx = rows.firstIndex(where: { $0.seq == seq }) {
+        // 选中态按键恢复: follow 追加新记录时不跳走; 进行中那条落盘后键不变, 详情就地换成最终记录
+        if let key = selectedKey, let idx = rows.firstIndex(where: { $0.key == key }) {
             if tableView.selectedRow != idx {
+                restoringSelection = true
                 tableView.selectRowIndexes([idx], byExtendingSelection: false)
+                restoringSelection = false
             }
-        } else if selectedSeq == nil, !rows.isEmpty {
+            if rows[idx].live || shownLive { showDetail(rows[idx], quiet: true) }
+        } else if selectedKey == nil, !rows.isEmpty {
             tableView.selectRowIndexes([0], byExtendingSelection: false)
         } else if rows.isEmpty {
             showDetail(nil)
@@ -387,6 +422,7 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
     }
 
     private func statusColor(_ rec: TrafficRecord) -> NSColor {
+        if rec.live { return .systemBlue }
         switch rec.status {
         case 0: return .tertiaryLabelColor // 没等到响应
         case 200..<300: return .systemGreen
@@ -418,17 +454,19 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
 
     func tableViewSelectionDidChange(_ notification: Notification) {
         let row = tableView.selectedRow
-        guard row >= 0, row < rows.count else { return }
-        selectedSeq = rows[row].seq
+        guard !restoringSelection, row >= 0, row < rows.count else { return }
+        selectedKey = rows[row].key
         showDetail(rows[row])
     }
 
     // MARK: - 详情: 同一条的 req / res 绑定展示
 
-    private func showDetail(_ rec: TrafficRecord?) {
+    /// `quiet` = 同一条的刷新 (进行中逐拍更新 / 落盘后换成最终记录): 不闪「读取中…」, 保住滚动位置。
+    private func showDetail(_ rec: TrafficRecord?, quiet: Bool = false) {
         detailToken += 1
-        detail = nil
+        if !quiet { detail = nil }
         guard let rec else {
+            shownLive = false
             metaLabel.stringValue = ""
             reqPane.text = ""
             resPane.text = ""
@@ -439,23 +477,36 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         metaLabel.stringValue = rec.summary
         reqPane.sizeText = TrafficRecord.size(rec.reqBytes)
         resPane.sizeText = TrafficRecord.size(rec.resBytes)
-        reqPane.text = "读取中…"
-        resPane.text = ""
+        if !quiet {
+            reqPane.text = "读取中…"
+            resPane.text = ""
+        }
 
         let token = detailToken
         let target = day
         Task.detached(priority: .userInitiated) {
-            let loaded = TrafficReader.detail(day: target, offset: rec.offset, length: rec.length)
+            let loaded: TrafficReader.Detail?
+            if rec.live, let id = rec.id {
+                loaded = await LiveFeed.line(id: id).map(TrafficReader.detail(line:))
+            } else {
+                loaded = TrafficReader.detail(day: target, offset: rec.offset, length: rec.length)
+            }
             await MainActor.run {
                 guard token == self.detailToken else { return } // 期间又换了选中行
+                // 进行中那条恰好落盘: 下一拍扫到最终记录会就地换上, 保留当前内容
+                guard let loaded else {
+                    if !quiet { self.reqPane.text = "这条刚结束, 稍后自动换成最终记录" }
+                    return
+                }
+                self.shownLive = rec.live
                 self.detail = loaded
-                self.renderDetail()
+                self.renderDetail(keepScroll: quiet)
             }
         }
     }
 
     /// 两条腿 × 两种读法共用同一对面板: 只换文本, 不重读文件也不重新解析。
-    private func renderDetail() {
+    private func renderDetail(keepScroll: Bool = false) {
         guard let detail else { return }
         legPicker.setEnabled(detail.hasUpstream, forSegment: 1)
         if !detail.hasUpstream, legPicker.selectedSegment == 1 {
@@ -465,8 +516,15 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         let core = viewPicker.selectedSegment == 0
         reqPane.title = upstream ? "Request → 上游" : "Request ← 客户端"
         resPane.title = upstream ? "Response ← 上游" : "Response → 客户端"
-        reqPane.text = (upstream ? detail.upstreamRequest : detail.clientRequest).text(core: core)
-        resPane.text = (upstream ? detail.upstreamResponse : detail.clientResponse).text(core: core)
+        let req = (upstream ? detail.upstreamRequest : detail.clientRequest).text(core: core)
+        let res = (upstream ? detail.upstreamResponse : detail.clientResponse).text(core: core)
+        if keepScroll {
+            reqPane.update(req)
+            resPane.update(res)
+        } else {
+            reqPane.text = req
+            resPane.text = res
+        }
     }
 
     @objc private func legChanged() {
@@ -488,14 +546,22 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
     }
 
     @objc private func tick() {
-        guard followCheck.state == .on else { return }
+        guard followCheck.state == .on, !liveFetching else { return }
         // 跨零点: 新的一天是新文件, 自动跟到最新
         if let latest = TrafficReader.days().first, latest != day {
-            selectedSeq = nil
+            selectedKey = nil
             reloadDays(selecting: latest)
             return
         }
-        scan(reset: false)
+        // 先取进行中再扫文件: 交接瞬间那条两边都有 (按 id 去重), 不会两边都没有
+        liveFetching = true
+        Task {
+            let got = await LiveFeed.list()
+            self.liveFetching = false
+            let changed = !self.live.isEmpty || !got.isEmpty
+            self.live = got
+            self.scan(reset: false, relist: changed)
+        }
     }
 
     @objc private func followChanged() {
@@ -504,7 +570,7 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
 
     @objc private func dayChanged() {
         guard let picked = dayPopup.titleOfSelectedItem, picked != "无记录" else { return }
-        selectedSeq = nil
+        selectedKey = nil
         reloadDays(selecting: picked)
     }
 

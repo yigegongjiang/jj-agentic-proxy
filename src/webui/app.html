@@ -81,7 +81,8 @@ tbody tr { cursor: default; }
 .right { text-align: right; }
 .dim { color: var(--fg-dim); }
 .s0 { color: var(--fg-faint); } .s2 { color: var(--green); } .s3 { color: var(--teal); }
-.s4 { color: var(--orange); } .s5 { color: var(--red); }
+.s4 { color: var(--orange); } .s5 { color: var(--red); } .slive { color: var(--accent); }
+tbody tr.live td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
 #empty { padding: 24px 14px; color: var(--fg-dim); }
 
 /* ---------- 详情 ---------- */
@@ -995,9 +996,10 @@ function httpText(start, headers, body, bodyNote = '') {
   return lines.join('\n');
 }
 
-function statusLine(code) {
+function statusLine(code, inflight = false) {
   const n = asInt(code);
-  return n === 0 ? 'HTTP —  (没等到响应)' : `HTTP ${n}`;
+  if (n === 0) return inflight ? 'HTTP —  (等待上游响应…)' : 'HTTP —  (没等到响应)';
+  return `HTTP ${n}`;
 }
 
 const bothLegs = text => ({ raw: text, core: text });
@@ -1015,7 +1017,7 @@ function buildDetail(line) {
       core: Core.request(path, dict.req),
     },
     clientResponse: {
-      raw: httpText(statusLine(dict.status), dict.res_headers, dict.res),
+      raw: httpText(statusLine(dict.status, dict.inflight === true), dict.res_headers, dict.res),
       core: Core.response(path, dict.res),
     },
     upstreamRequest: bothLegs(''),
@@ -1037,7 +1039,7 @@ function buildDetail(line) {
     core: note + Core.request(upURL, upBody),
   };
   out.upstreamResponse = bothLegs(httpText(
-    statusLine(up.status), up.res_headers, null,
+    statusLine(up.status, dict.inflight === true), up.res_headers, null,
     '（上游响应体不单独记录: 透传面与客户端一致, 转换面见 Client 的 Response）',
   ));
   return out;
@@ -1051,11 +1053,15 @@ const FOLLOW_MS = 1500;
 
 const S = {
   day: '',
+  latestDay: '',  // 进行中的记录只会落进最新那天 -> 只在看最新一天时列出
   all: [],        // 文件顺序: 旧 -> 新
-  rows: [],       // 展示顺序: 新 -> 旧
+  ids: new Set(), // all 里出现过的 id: 进行中那条落盘后按 id 去重
+  live: [],       // 进行中 (还没落盘), 旧 -> 新
+  rows: [],       // 展示顺序: 进行中 (新 -> 旧) 置顶, 再接已完成 (新 -> 旧)
   consumed: 0,
   nextSeq: 0,
-  selectedSeq: null,
+  selectedKey: null,
+  shownLive: false, // 详情面板当前展示的是进行中快照
   detail: null,
   detailToken: 0,
   leg: 0,         // 0 = Client ↔ Proxy, 1 = Proxy ↔ Upstream
@@ -1079,7 +1085,12 @@ const clockOf = ts => {
   return at < 0 ? ts : ts.slice(at + 1, at + 13);
 };
 
-const statusText = r => r.status === 0 ? '—' : String(r.status);
+/** 选中态的键: 有 id 用 id (进行中 -> 落盘后同一个键, 选中不丢), 旧版本写的行退回文件内序号。 */
+const keyOf = r => r.id ? `i:${r.id}` : `s:${r.seq}`;
+
+// 进行中: 还没响应头 = …, 有了 = 状态码 + …
+const statusText = r => r._live ? (r.status ? `${r.status}…` : '…')
+  : r.status === 0 ? '—' : String(r.status);
 
 const elapsedText = r => r.elapsed_ms < 1000 ? `${r.elapsed_ms}ms` : `${(r.elapsed_ms / 1000).toFixed(1)}s`;
 
@@ -1094,6 +1105,7 @@ function summaryOf(r) {
   let out = `${clockOf(r.ts)} · ${r.method} ${r.path} · ${r.surface} · ${statusText(r)} · ${elapsedText(r)}`;
   if (r.model) out += ` · ${r.model}`;
   if (r.stream) out += ' · stream';
+  if (r._live) out += ' · 进行中';
   if (r.incomplete) out += ` · ⚠︎ ${r.incomplete}`;
   return out;
 }
@@ -1101,18 +1113,19 @@ function summaryOf(r) {
 function haystackOf(r) {
   if (r._hay === undefined) {
     r._hay = [r.ts, r.surface, r.method, r.path, r.status === 0 ? '' : String(r.status),
-             r.model || '', r.incomplete || ''].join(' ').toLowerCase();
+             r.model || '', r.incomplete || '', r._live ? '进行中 live' : ''].join(' ').toLowerCase();
   }
   return r._hay;
 }
 
-const statusClass = r => r.status === 0 ? 's0'
+const statusClass = r => r._live ? 'slive' : r.status === 0 ? 's0'
   : r.status < 300 ? 's2' : r.status < 400 ? 's3' : r.status < 500 ? 's4' : 's5';
 
 /* ---------- 日期 / 扫描 ---------- */
 async function reloadDays(wanted) {
   let days = [];
   try { days = (await api('/api/days')).days || []; } catch { /* 目录还不存在 */ }
+  S.latestDay = days[0] || '';
   const target = wanted || (days.includes(S.day) ? S.day : days[0]);
   const sel = $('days');
   sel.innerHTML = '';
@@ -1123,57 +1136,78 @@ async function reloadDays(wanted) {
   }
   sel.disabled = !days.length;
   if (!target || !days.includes(target)) {
-    S.day = ''; S.all = [];
+    S.day = ''; S.all = []; S.ids = new Set();
     applyFilter();
     return;
   }
   sel.value = target;
   if (target !== S.day) {
-    S.day = target; S.all = []; S.consumed = 0; S.nextSeq = 0;
+    S.day = target; S.all = []; S.ids = new Set(); S.consumed = 0; S.nextSeq = 0;
   }
   await scan(true);
 }
 
+/** 返回是否读到了新记录 (调用方据此决定要不要重排列表)。 */
 async function scan(reset) {
-  if (S.scanning || !S.day) return;
+  if (S.scanning || !S.day) return false;
   S.scanning = true;
   const target = S.day;
   const from = reset ? 0 : S.consumed;
   const seq = reset ? 0 : S.nextSeq;
   try {
     const b = await api(`/api/scan/${encodeURIComponent(target)}/${from}/${seq}`);
-    if (target !== S.day) return; // 期间用户切了日期
+    if (target !== S.day) return false; // 期间用户切了日期
     const hard = reset || b.reset;
-    if (hard) S.all = b.records;
-    else if (!b.records.length) { S.consumed = b.consumed; return; } // 无新记录: 不动列表
+    if (hard) { S.all = b.records; S.ids = new Set(); }
+    else if (!b.records.length) { S.consumed = b.consumed; return false; } // 无新记录: 不动列表
     else S.all = S.all.concat(b.records);
+    for (const r of b.records) if (r.id) S.ids.add(r.id);
     S.consumed = b.consumed;
     S.nextSeq = b.next_seq;
     applyFilter();
+    return true;
   } catch (e) {
     console.warn('扫描失败', e);
+    return false;
   } finally {
     S.scanning = false;
   }
 }
 
+/** 进行中的记录只在内存里: 取不到 (代理刚停) 就当没有。 */
+async function fetchLive() {
+  try {
+    const got = (await api('/api/inflight')).records || [];
+    for (const r of got) r._live = true;
+    S.live = got;
+  } catch {
+    S.live = [];
+  }
+}
+
+const showsLive = () => !S.day || S.day === S.latestDay;
+
 /* ---------- 过滤 / 列表 ---------- */
 function applyFilter() {
   const terms = $('q').value.toLowerCase().split(/[\s\t]+/).filter(Boolean);
-  const matched = terms.length
-    ? S.all.filter(r => terms.every(t => haystackOf(r).includes(t)))
-    : S.all;
-  S.rows = matched.slice().reverse();
+  const hit = r => terms.every(t => haystackOf(r).includes(t));
+  // 先取进行中再扫文件 -> 刚落盘那条两边都有: 以文件为准
+  const live = showsLive() ? S.live.filter(r => !S.ids.has(r.id)) : [];
+  const done = terms.length ? S.all.filter(hit) : S.all;
+  S.rows = live.filter(hit).reverse().concat(done.slice().reverse());
 
   renderRows();
-  $('count').textContent = terms.length
-    ? `${S.rows.length} / ${S.all.length} 条`
-    : `${S.all.length} 条`;
+  const liveNote = live.length ? ` · ${live.length} 进行中` : '';
+  $('count').textContent = (terms.length
+    ? `${S.rows.length} / ${S.all.length + live.length} 条`
+    : `${S.all.length} 条`) + liveNote;
 
-  // 选中态按 seq 恢复: follow 追加新记录时不跳走
-  const idx = S.selectedSeq === null ? -1 : S.rows.findIndex(r => r.seq === S.selectedSeq);
-  if (idx >= 0) markSelected(idx);
-  else if (S.selectedSeq === null && S.rows.length) select(0);
+  // 选中态按键恢复: follow 追加新记录时不跳走; 进行中那条落盘后键不变, 详情自动换成最终记录
+  const idx = S.selectedKey === null ? -1 : S.rows.findIndex(r => keyOf(r) === S.selectedKey);
+  if (idx >= 0) {
+    markSelected(idx);
+    if (S.rows[idx]._live || S.shownLive) showDetail(S.rows[idx], true);
+  } else if (S.selectedKey === null && S.rows.length) select(0);
   else if (!S.rows.length) showDetail(null);
 }
 
@@ -1182,7 +1216,7 @@ function renderRows() {
   const frag = document.createDocumentFragment();
   for (const r of S.rows) {
     const tr = document.createElement('tr');
-    tr.dataset.seq = r.seq;
+    if (r._live) tr.className = 'live';
     const cells = [
       ['mono', clockOf(r.ts)],
       ['dim', r.surface],
@@ -1203,8 +1237,8 @@ function renderRows() {
   }
   body.replaceChildren(frag);
   $('empty').style.display = S.rows.length ? 'none' : 'block';
-  if (S.selectedSeq !== null) {
-    const i = S.rows.findIndex(r => r.seq === S.selectedSeq);
+  if (S.selectedKey !== null) {
+    const i = S.rows.findIndex(r => keyOf(r) === S.selectedKey);
     if (i >= 0) body.children[i].classList.add('sel');
   }
 }
@@ -1221,16 +1255,18 @@ function markSelected(idx) {
 function select(idx) {
   const rec = S.rows[idx];
   if (!rec) return;
-  S.selectedSeq = rec.seq;
+  S.selectedKey = keyOf(rec);
   markSelected(idx);
   showDetail(rec);
 }
 
 /* ---------- 详情 ---------- */
-async function showDetail(rec) {
+/** `quiet` = 同一条的刷新 (进行中逐拍更新 / 落盘后换成最终记录): 不闪「读取中…」, 保住滚动位置。 */
+async function showDetail(rec, quiet = false) {
   S.detailToken += 1;
-  S.detail = null;
+  if (!quiet) S.detail = null;
   if (!rec) {
+    S.shownLive = false;
     $('meta').textContent = '';
     for (const k of ['req', 'res']) {
       $(`${k}-body`).textContent = '';
@@ -1241,25 +1277,40 @@ async function showDetail(rec) {
   $('meta').textContent = summaryOf(rec);
   $('req-size').textContent = sizeText(rec.req_bytes);
   $('res-size').textContent = sizeText(rec.res_bytes);
-  $('req-body').textContent = '读取中…';
-  $('res-body').textContent = '';
+  if (!quiet) {
+    $('req-body').textContent = '读取中…';
+    $('res-body').textContent = '';
+  }
 
   const token = S.detailToken;
   const target = S.day;
   try {
-    const line = await api(
-      `/api/detail/${encodeURIComponent(target)}/${rec.offset}/${rec.length}`);
+    const line = await api(rec._live
+      ? `/api/inflight/${encodeURIComponent(rec.id)}`
+      : `/api/detail/${encodeURIComponent(target)}/${rec.offset}/${rec.length}`);
     if (token !== S.detailToken) return; // 期间又换了选中行
+    S.shownLive = !!rec._live;
     S.detail = buildDetail(line);
-    renderDetail();
+    renderDetail(quiet);
   } catch (e) {
     if (token !== S.detailToken) return;
+    // 进行中那条恰好落盘 (404): 下一拍扫到最终记录会自动换上, 保留当前内容
+    if (rec._live && quiet) return;
     $('req-body').textContent = `读取失败: ${e.message}`;
   }
 }
 
+/** 换文本但保住阅读位置; 原本停在底部的 (看流式输出) 继续贴底。 */
+function setBody(el, text, keepScroll) {
+  if (el.textContent === text) return;
+  const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 4;
+  const top = el.scrollTop;
+  el.textContent = text;
+  if (keepScroll) el.scrollTop = atBottom && top > 0 ? el.scrollHeight : top;
+}
+
 /** 两条腿 × 两种读法共用同一对面板: 只换文本, 不重取也不重新解析。 */
-function renderDetail() {
+function renderDetail(keepScroll = false) {
   const d = S.detail;
   const legButtons = $('leg').children;
   legButtons[1].disabled = !(d && d.hasUpstream);
@@ -1272,8 +1323,8 @@ function renderDetail() {
   const key = S.view === 0 ? 'core' : 'raw';
   $('req-title').textContent = up ? 'Request → 上游' : 'Request ← 客户端';
   $('res-title').textContent = up ? 'Response ← 上游' : 'Response → 客户端';
-  $('req-body').textContent = (up ? d.upstreamRequest : d.clientRequest)[key];
-  $('res-body').textContent = (up ? d.upstreamResponse : d.clientResponse)[key];
+  setBody($('req-body'), (up ? d.upstreamRequest : d.clientRequest)[key], keepScroll);
+  setBody($('res-body'), (up ? d.upstreamResponse : d.clientResponse)[key], keepScroll);
 }
 
 /* ---------- 服务状态 ---------- */
@@ -1435,7 +1486,7 @@ draggable($('hgrip'), e => {
 
 /* ---------- 事件绑定 ---------- */
 $('q').addEventListener('input', applyFilter);
-$('days').addEventListener('change', e => { S.selectedSeq = null; reloadDays(e.target.value); });
+$('days').addEventListener('change', e => { S.selectedKey = null; reloadDays(e.target.value); });
 $('follow').addEventListener('change', e => { if (e.target.checked) tick(); });
 
 $('rows').addEventListener('click', e => {
@@ -1506,7 +1557,7 @@ document.addEventListener('keydown', e => {
   if (e.target === $('q') || e.target.tagName === 'SELECT' || e.target.tagName === 'INPUT') return;
   if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
     e.preventDefault();
-    const cur = S.rows.findIndex(r => r.seq === S.selectedSeq);
+    const cur = S.rows.findIndex(r => keyOf(r) === S.selectedKey);
     const next = e.key === 'ArrowDown' ? cur + 1 : cur - 1;
     if (next >= 0 && next < S.rows.length) select(next);
   }
@@ -1518,18 +1569,25 @@ async function tick() {
   // 跨零点: 新的一天是新文件, 自动跟到最新
   try {
     const days = (await api('/api/days')).days || [];
+    S.latestDay = days[0] || '';
     if (days.length && days[0] !== S.day) {
-      S.selectedSeq = null;
+      S.selectedKey = null;
+      await fetchLive();
       await reloadDays(days[0]);
       return;
     }
   } catch { /* 目录暂时读不到: 下一拍再试 */ }
-  await scan(false);
+  // 先取进行中再扫文件: 交接瞬间那条两边都有 (按 id 去重), 不会两边都没有
+  const hadLive = S.live.length > 0;
+  await fetchLive();
+  const scanned = await scan(false);
+  // 进行中的耗时 / 字节数每拍都在变; 扫到新记录时 scan 已重排过
+  if (!scanned && (hadLive || S.live.length)) applyFilter();
 }
 
 setInterval(tick, FOLLOW_MS);
 setInterval(refreshStatus, 15000);
-reloadDays(null);
+fetchLive().then(() => reloadDays(null));
 refreshStatus();
 log([
   '上面的按钮把命令跑在「跑着代理的那台机器」上, 输出显示在这里。',

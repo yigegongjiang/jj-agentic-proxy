@@ -3,12 +3,14 @@
 //! 记两条腿: 客户端 <-> 代理 (header + body 原样), 代理 <-> 上游 (注入后的 header + 被改写的 body)。
 //! 一行一次往返 + 单次 append 写 -> 并发请求不互相穿插, `rg` / `jq` 直接可读。
 //! 只按天切文件, 永不删除、不设体积阈值 (本机自用, 完整记录比省磁盘重要; 清理由人类自行决定)。
+//! 落盘要等响应结束 -> 进行中的往返另在内存登记 (落盘即注销), 查看器经 `/api/inflight` 读。
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read as _, Seek as _, SeekFrom, Write as _};
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
@@ -34,8 +36,18 @@ pub fn log_dir() -> PathBuf {
 
 // ---------- 记录 ----------
 
-/// 一次往返: 请求进来时建立, 响应体收完 (或连接中断) 时落盘。
+/// 一次往返: 请求进来时建立并登记为进行中, 响应体收完 (或连接中断) 时落盘并注销。
 pub struct Record {
+    live: Arc<Inflight>,
+    done: bool,
+}
+
+/// 进行中的往返: 查看器不必等响应结束才看得到。只在内存 -> daemon 退出即清空, 不留残留。
+struct Inflight {
+    /// 与落盘那行同一个 id -> 查看器据此把进行中那条换成最终记录, 选中态不丢
+    id: String,
+    /// 请求进来的时刻 (落盘行的 `ts` 是结束时刻)
+    ts: String,
     started: Instant,
     surface: Surface,
     method: String,
@@ -45,16 +57,34 @@ pub struct Record {
     req_headers: Value,
     req_raw: Bytes,
     req: Value,
-    req_bytes: usize,
+    progress: Mutex<Progress>,
+}
+
+/// 响应侧随时间增长的部分; 查看器读进行中详情时拷一份出锁再序列化, 不拖住转发。
+#[derive(Clone, Default)]
+struct Progress {
     status: u16,
     res_headers: Value,
     res: Vec<u8>,
     upstream: Option<Leg>,
-    done: bool,
+}
+
+static INFLIGHT: Mutex<Vec<Arc<Inflight>>> = Mutex::new(Vec::new());
+
+fn inflight() -> std::sync::MutexGuard<'static, Vec<Arc<Inflight>>> {
+    INFLIGHT.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// 进程启动时刻 (ms, hex) + 进程内序号: 跨重启不撞号 (同一天文件里会有上个进程写的行)。
+fn next_id() -> String {
+    static BOOT: OnceLock<i64> = OnceLock::new();
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let boot = *BOOT.get_or_init(now_ms);
+    format!("{boot:x}-{}", SEQ.fetch_add(1, Ordering::Relaxed))
 }
 
 /// 代理 <-> 上游那一腿: header 是注入 CLI 身份后的实际值, body 是本层规范化后的实际值。
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Leg {
     method: String,
     url: String,
@@ -94,6 +124,10 @@ struct Line<'a> {
     /// 仅异常时出现: 客户端断开 / 上游流中断。
     #[serde(skip_serializing_if = "Option::is_none")]
     incomplete: Option<&'a str>,
+    id: &'a str,
+    /// 仅进行中的快照带 (`/api/inflight/{id}`), 落盘行没有
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    inflight: bool,
     req_headers: &'a Value,
     req: &'a Value,
     res_headers: &'a Value,
@@ -101,6 +135,46 @@ struct Line<'a> {
     /// 没打到上游 (本层直接应答 / 未登录) 时缺席
     #[serde(skip_serializing_if = "Option::is_none")]
     upstream: Option<LegLine<'a>>,
+}
+
+impl Inflight {
+    fn line(&self, p: &Progress, ts: &str, incomplete: Option<&str>, inflight: bool) -> String {
+        let upstream = p.upstream.as_ref().map(|leg| LegLine {
+            method: &leg.method,
+            url: &leg.url,
+            status: leg.status,
+            req_headers: &leg.req_headers,
+            res_headers: &leg.res_headers,
+            // 未改写就不重复存一份 (客户端 req 即上游 req)
+            req_body: (leg.req_body != self.req_raw).then(|| payload(&leg.req_body)),
+        });
+        let line = Line {
+            ts,
+            surface: self.surface.key(),
+            method: &self.method,
+            path: &self.path,
+            status: p.status,
+            stream: self.stream,
+            elapsed_ms: self.started.elapsed().as_millis(),
+            req_bytes: self.req_raw.len(),
+            res_bytes: p.res.len(),
+            model: self.model.as_deref(),
+            incomplete,
+            id: &self.id,
+            inflight,
+            req_headers: &self.req_headers,
+            req: &self.req,
+            res_headers: &p.res_headers,
+            res: payload(&p.res),
+            upstream,
+        };
+        // 全是 String 键 + 已解析的 Value -> 序列化不会失败
+        serde_json::to_string(&line).unwrap_or_default()
+    }
+
+    fn progress(&self) -> std::sync::MutexGuard<'_, Progress> {
+        self.progress.lock().unwrap_or_else(|e| e.into_inner())
+    }
 }
 
 /// `None` = 不记录。`/health` 是本机状态查询, 无上游往返, 探活会刷屏。
@@ -115,7 +189,9 @@ pub fn start(
         return None;
     }
     let req = payload(body);
-    Some(Record {
+    let live = Arc::new(Inflight {
+        id: next_id(),
+        ts: parts(now_ms()).1,
         started: Instant::now(),
         surface,
         method: method.to_string(),
@@ -124,14 +200,11 @@ pub fn start(
         stream: req.get("stream").and_then(Value::as_bool).unwrap_or(false),
         req_headers: headers_json(headers),
         req_raw: body.clone(),
-        req_bytes: body.len(),
         req,
-        status: 0,
-        res_headers: Value::Null,
-        res: Vec::new(),
-        upstream: None,
-        done: false,
-    })
+        progress: Mutex::new(Progress::default()),
+    });
+    inflight().push(live.clone());
+    Some(Record { live, done: false })
 }
 
 /// header 原样记录 (含 `authorization`): 本机自用, 凭证本来就在同目录的 auth.json 里,
@@ -195,19 +268,22 @@ pub(crate) fn note_upstream_response(status: StatusCode, headers: &HeaderMap) {
 
 impl Record {
     pub fn set_upstream(&mut self, leg: Option<Leg>) {
-        self.upstream = leg;
+        self.live.progress().upstream = leg;
     }
 
     /// 已在内存的响应直接落盘 (保住 content-length); 流式响应逐块 tee, 不缓冲转发。
     pub async fn capture(mut self, resp: Response) -> Response {
-        self.status = resp.status().as_u16();
-        self.res_headers = headers_json(resp.headers());
+        {
+            let mut p = self.live.progress();
+            p.status = resp.status().as_u16();
+            p.res_headers = headers_json(resp.headers());
+        }
         let (parts, body) = resp.into_parts();
         if body.size_hint().exact().is_some() {
             let bytes = axum::body::to_bytes(body, usize::MAX)
                 .await
                 .unwrap_or_default();
-            self.res.extend_from_slice(&bytes);
+            self.live.progress().res.extend_from_slice(&bytes);
             self.flush(None);
             return Response::from_parts(parts, Body::from(bytes));
         }
@@ -219,7 +295,7 @@ impl Record {
             while let Some(item) = upstream.next().await {
                 match item {
                     Ok(chunk) => {
-                        rec.res.extend_from_slice(&chunk);
+                        rec.live.progress().res.extend_from_slice(&chunk);
                         yield Ok(chunk);
                     }
                     Err(e) => {
@@ -234,47 +310,21 @@ impl Record {
         Response::from_parts(parts, Body::from_stream(teed))
     }
 
-    /// 落一行; 幂等 (Drop 兜底时不会重复写)。
+    /// 落一行并注销进行中; 幂等 (Drop 兜底时不会重复写)。
     fn flush(&mut self, incomplete: Option<&str>) {
         if self.done {
             return;
         }
         self.done = true;
         let (day, ts) = parts(now_ms());
-        let upstream = self.upstream.as_ref().map(|leg| LegLine {
-            method: &leg.method,
-            url: &leg.url,
-            status: leg.status,
-            req_headers: &leg.req_headers,
-            res_headers: &leg.res_headers,
-            // 未改写就不重复存一份 (客户端 req 即上游 req)
-            req_body: (leg.req_body != self.req_raw).then(|| payload(&leg.req_body)),
-        });
-        let line = Line {
-            ts: &ts,
-            surface: self.surface.key(),
-            method: &self.method,
-            path: &self.path,
-            status: self.status,
-            stream: self.stream,
-            elapsed_ms: self.started.elapsed().as_millis(),
-            req_bytes: self.req_bytes,
-            res_bytes: self.res.len(),
-            model: self.model.as_deref(),
-            incomplete,
-            req_headers: &self.req_headers,
-            req: &self.req,
-            res_headers: &self.res_headers,
-            res: payload(&self.res),
-            upstream,
+        let mut text = {
+            let p = self.live.progress();
+            self.live.line(&p, &ts, incomplete, false)
         };
-        match serde_json::to_string(&line) {
-            Ok(mut text) => {
-                text.push('\n');
-                append(&day, &text);
-            }
-            Err(e) => tracing::warn!(error = %e, "往返记录序列化失败"),
-        }
+        text.push('\n');
+        append(&day, &text);
+        // 先落盘再注销: 查看器先取进行中再扫文件 -> 交接瞬间最多两边都有 (按 id 去重), 不会两边都没有
+        inflight().retain(|r| !Arc::ptr_eq(r, &self.live));
     }
 }
 
@@ -282,6 +332,60 @@ impl Drop for Record {
     fn drop(&mut self) {
         self.flush(Some("客户端断开"));
     }
+}
+
+// ---------- 进行中 (查看器读) ----------
+
+/// 进行中列表的一条: 与落盘行的摘要段同名同义, `ts` = 请求进来的时刻。
+#[derive(Serialize)]
+pub struct InflightSummary {
+    id: String,
+    ts: String,
+    surface: &'static str,
+    method: String,
+    path: String,
+    /// 0 = 上游还没回响应头
+    status: u16,
+    stream: bool,
+    elapsed_ms: u128,
+    req_bytes: usize,
+    res_bytes: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+}
+
+/// 旧 -> 新 (登记顺序 = 请求进来的顺序)。
+pub fn inflight_list() -> Vec<InflightSummary> {
+    let live: Vec<Arc<Inflight>> = inflight().clone();
+    live.iter()
+        .map(|r| {
+            let (status, res_bytes) = {
+                let p = r.progress();
+                (p.status, p.res.len())
+            };
+            InflightSummary {
+                id: r.id.clone(),
+                ts: r.ts.clone(),
+                surface: r.surface.key(),
+                method: r.method.clone(),
+                path: r.path.clone(),
+                status,
+                stream: r.stream,
+                elapsed_ms: r.started.elapsed().as_millis(),
+                req_bytes: r.req_raw.len(),
+                res_bytes,
+                model: r.model.clone(),
+            }
+        })
+        .collect()
+}
+
+/// 进行中那条的整行快照 (与落盘行同形状 + `inflight: true`); 已结束 = `None` (去文件里找)。
+pub fn inflight_line(id: &str) -> Option<String> {
+    let live = inflight().iter().find(|r| r.id == id).cloned()?;
+    // 拷出锁再序列化: 大 body 的序列化不占着转发路径要的锁
+    let snapshot = live.progress().clone();
+    Some(live.line(&snapshot, &live.ts, None, true))
 }
 
 /// JSON body 存成 JSON (可 `jq`), 其余 (SSE / 文本 / 二进制) 存成字符串。
@@ -507,6 +611,13 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store;
+
+    /// 测试里造的记录不落盘: 否则 Drop 兜底会往真实日志目录写一行。
+    fn discard(mut rec: Record) {
+        rec.done = true;
+        inflight().retain(|r| !Arc::ptr_eq(r, &rec.live));
+    }
 
     #[test]
     fn timestamp_is_jst_and_day_matches_file_name() {
@@ -571,14 +682,14 @@ mod tests {
         for path in ["/health", "/v1/health", "/health?x=1"] {
             assert!(start(Surface::Codex, &Method::GET, path, &h, &Bytes::new()).is_none());
         }
-        assert!(start(
+        let models = start(
             Surface::Codex,
             &Method::GET,
             "/v1/models",
             &h,
-            &Bytes::new()
-        )
-        .is_some());
+            &Bytes::new(),
+        );
+        discard(models.expect("非 /health 应记录"));
     }
 
     #[test]
@@ -597,79 +708,94 @@ mod tests {
         );
     }
 
-    /// 摘要标量在前、header / body 在后, 且只写一次 (Drop 不重复)。
+    /// 摘要标量在前、header / body 在后。
     #[test]
     fn line_shape_is_summary_first_then_payload() {
         let mut rec = record(r#"{"model":"claude-opus-5","stream":true}"#);
-        rec.status = 200;
-        rec.res = b"data: hi\n\n".to_vec();
-        rec.res_headers = headers_json(&client_headers());
         // 上游那一腿: body 被本层改写过 -> 单独记一份
-        rec.upstream = Some(Leg {
+        rec.set_upstream(Some(Leg {
             method: "POST".into(),
             url: "https://api.anthropic.com/v1/messages".into(),
             req_headers: headers_json(&client_headers()),
             req_body: Bytes::from_static(br#"{"model":"claude-opus-5","system":[]}"#),
             status: 200,
             res_headers: headers_json(&client_headers()),
-        });
-
-        let upstream = rec.upstream.as_ref().map(|leg| LegLine {
-            method: &leg.method,
-            url: &leg.url,
-            status: leg.status,
-            req_headers: &leg.req_headers,
-            res_headers: &leg.res_headers,
-            req_body: (leg.req_body != rec.req_raw).then(|| payload(&leg.req_body)),
-        });
-        let text = serde_json::to_string(&Line {
-            ts: "2026-07-31T19:57:09.964+09:00",
-            surface: rec.surface.key(),
-            method: &rec.method,
-            path: &rec.path,
-            status: rec.status,
-            stream: rec.stream,
-            elapsed_ms: 12,
-            req_bytes: rec.req_bytes,
-            res_bytes: rec.res.len(),
-            model: rec.model.as_deref(),
-            incomplete: None,
-            req_headers: &rec.req_headers,
-            req: &rec.req,
-            res_headers: &rec.res_headers,
-            res: payload(&rec.res),
-            upstream,
-        })
-        .unwrap();
+        }));
+        let text = {
+            let mut p = rec.live.progress();
+            p.status = 200;
+            p.res = b"data: hi\n\n".to_vec();
+            p.res_headers = headers_json(&client_headers());
+            rec.live
+                .line(&p, "2026-07-31T19:57:09.964+09:00", None, false)
+        };
 
         assert!(
             text.starts_with(r#"{"ts":"2026-07-31T19:57:09.964+09:00","surface":"claude-code""#)
         );
         assert!(text.contains(r#""model":"claude-opus-5""#));
-        // 摘要段 = `,"req_headers":` 之前那截, 只有标量
+        // 摘要段 = `,"req_headers":` 之前那截, 只有标量; id 在摘要段内 (查看器只解析这截)
         let (head, _) = text.split_at(text.find(r#","req_headers":"#).unwrap());
         assert!(head.contains("res_bytes"));
+        assert!(head.contains(&format!(r#""id":"{}""#, rec.live.id)));
+        assert!(!head.contains("inflight"));
         assert!(!head.contains("x-api-key"));
         // 两条腿都在
         assert!(text.contains(r#""x-api-key":"sk-client""#));
         assert!(text.contains(r#""url":"https://api.anthropic.com/v1/messages""#));
         assert!(text.contains(r#""req_body":{"model":"claude-opus-5","system":[]}"#));
 
-        // 记录只落一次: 手动 flush 后 Drop 不再写
-        rec.done = true;
-        drop(rec);
+        discard(rec);
     }
 
     /// 上游 body 与客户端逐字节相同 -> 不重复存第二份。
     #[test]
     fn unchanged_upstream_body_is_not_duplicated() {
         let raw = r#"{"model":"m"}"#;
-        let rec = record(raw);
-        let leg = Leg {
+        let mut rec = record(raw);
+        rec.set_upstream(Some(Leg {
             req_body: Bytes::from(raw.to_string()),
             ..Leg::default()
-        };
-        assert!(!(leg.req_body != rec.req_raw));
+        }));
+        let text = rec.live.line(&rec.live.progress(), "t", None, false);
+        assert!(text.contains(r#""upstream":{"#));
+        assert!(!text.contains("req_body"));
+        discard(rec);
+    }
+
+    /// 进行中: 请求一进来就可见, 响应逐块长; 无论正常结束还是中途被丢弃, 都注销且落盘一行。
+    #[test]
+    fn inflight_is_visible_until_flushed_and_never_leaks() {
+        let _dir_guard = store::TEST_DIR_LOCK.blocking_lock();
+        let dir = std::env::temp_dir().join(format!("jj-reqlog-live-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        *store::TEST_CONFIG_DIR.lock().unwrap() = Some(dir.clone());
+
+        let rec = record(r#"{"model":"m","stream":true}"#);
+        let id = rec.live.id.clone();
+        assert!(inflight_list().iter().any(|s| s.id == id));
+        rec.live
+            .progress()
+            .res
+            .extend_from_slice(b"data: partial\n\n");
+        let snap = inflight_line(&id).expect("进行中应可取快照");
+        assert!(snap.contains(r#""inflight":true"#));
+        assert!(snap.contains("data: partial"));
+
+        // 未 flush 直接丢弃 (= 请求 future 被取消) -> Drop 兜底落盘 + 注销
+        drop(rec);
+        assert!(inflight_list().iter().all(|s| s.id != id));
+        assert!(inflight_line(&id).is_none());
+        let (day, _) = parts(now_ms());
+        let saved = fs::read_to_string(log_dir().join(format!("{day}{EXT}"))).unwrap();
+        let last = saved.lines().last().unwrap();
+        assert!(last.contains(&format!(r#""id":"{id}""#)));
+        assert!(last.contains(r#""incomplete":"客户端断开""#));
+        assert!(!last.contains("inflight"));
+
+        *WRITER.lock().unwrap() = None;
+        *store::TEST_CONFIG_DIR.lock().unwrap() = None;
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

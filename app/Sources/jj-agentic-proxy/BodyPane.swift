@@ -11,10 +11,29 @@ final class BodyPane: NSView {
     var text: String = "" {
         didSet {
             textView.string = text
-            textView.scrollRangeToVisible(NSRange(location: 0, length: 0))
+            if !keepingScroll { textView.scrollRangeToVisible(NSRange(location: 0, length: 0)) }
             copyButton.isEnabled = !text.isEmpty
         }
     }
+
+    /// 同一条的刷新 (进行中逐拍更新 / 落盘后换成最终记录): 保住阅读位置; 原本停在底部的继续贴底 (看流式输出)。
+    func update(_ next: String) {
+        guard next != text else { return }
+        let clip = scroll.contentView
+        let origin = clip.bounds.origin
+        let atBottom = origin.y > 0 && origin.y + clip.bounds.height >= textView.frame.height - 4
+        keepingScroll = true
+        text = next
+        keepingScroll = false
+        if let layout = textView.layoutManager, let container = textView.textContainer {
+            layout.ensureLayout(for: container)
+        }
+        let y = atBottom ? max(0, textView.frame.height - clip.bounds.height) : origin.y
+        clip.scroll(to: NSPoint(x: origin.x, y: y))
+        scroll.reflectScrolledClipView(clip)
+    }
+
+    private var keepingScroll = false
 
     var sizeText: String {
         get { sizeLabel.stringValue }

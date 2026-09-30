@@ -21,8 +21,15 @@ nonisolated struct TrafficRecord: Sendable {
     let resBytes: Int
     let model: String?
     let incomplete: String?
+    /// 与进行中那条同 id -> 落盘后选中态不丢; 旧版本写的行没有
+    let id: String?
+    /// 进行中 (代理内存里, 还没落盘): 取自查看器端口, 不在日志文件里
+    let live: Bool
     /// 过滤用: 摘要字段小写拼接
     let haystack: String
+
+    /// 选中态的键: 有 id 用 id (进行中 -> 落盘后键不变), 旧行退回文件内序号
+    var key: String { id.map { "i:\($0)" } ?? "s:\(seq)" }
 
     /// HH:MM:SS.mmm
     var clock: String {
@@ -31,7 +38,11 @@ nonisolated struct TrafficRecord: Sendable {
         return String(parts[1].prefix(12))
     }
 
-    var statusText: String { status == 0 ? "—" : String(status) }
+    /// 进行中: 还没响应头 = …, 有了 = 状态码 + …
+    var statusText: String {
+        if live { return status == 0 ? "…" : "\(status)…" }
+        return status == 0 ? "—" : String(status)
+    }
 
     var elapsedText: String {
         elapsedMs < 1000 ? "\(elapsedMs)ms" : String(format: "%.1fs", Double(elapsedMs) / 1000)
@@ -42,6 +53,7 @@ nonisolated struct TrafficRecord: Sendable {
         var out = "\(clock) · \(method) \(path) · \(surface) · \(statusText) · \(elapsedText)"
         if let model { out += " · \(model)" }
         if stream { out += " · stream" }
+        if live { out += " · 进行中" }
         if let incomplete { out += " · ⚠︎ \(incomplete)" }
         return out
     }
@@ -62,9 +74,20 @@ nonisolated enum TrafficParser {
     static func record(line: Data, seq: Int, offset: UInt64) -> TrafficRecord? {
         let head = summaryHead(of: line) ?? line
         guard let obj = try? JSONSerialization.jsonObject(with: head),
-              let dict = obj as? [String: Any],
-              let ts = dict["ts"] as? String
+              let dict = obj as? [String: Any]
         else { return nil }
+        return record(dict: dict, seq: seq, offset: offset, length: line.count, live: false)
+    }
+
+    /// `/api/inflight` 的一条: 字段与日志行摘要段同名同义, 只是不在文件里 (offset / length 无意义)。
+    static func live(dict: [String: Any]) -> TrafficRecord? {
+        guard dict["id"] is String else { return nil }
+        return record(dict: dict, seq: -1, offset: 0, length: 0, live: true)
+    }
+
+    private static func record(dict: [String: Any], seq: Int, offset: UInt64, length: Int,
+                               live: Bool) -> TrafficRecord? {
+        guard let ts = dict["ts"] as? String else { return nil }
 
         let int = { (key: String) -> Int in (dict[key] as? NSNumber)?.intValue ?? 0 }
         let str = { (key: String) -> String in dict[key] as? String ?? "" }
@@ -72,12 +95,13 @@ nonisolated enum TrafficParser {
         let incomplete = dict["incomplete"] as? String
         let status = int("status")
         let fields = [ts, str("surface"), str("method"), str("path"),
-                      status == 0 ? "" : String(status), model ?? "", incomplete ?? ""]
+                      status == 0 ? "" : String(status), model ?? "", incomplete ?? "",
+                      live ? "进行中 live" : ""]
 
         return TrafficRecord(
             seq: seq,
             offset: offset,
-            length: line.count,
+            length: length,
             ts: ts,
             surface: str("surface"),
             method: str("method"),
@@ -89,6 +113,8 @@ nonisolated enum TrafficParser {
             resBytes: int("res_bytes"),
             model: model,
             incomplete: incomplete,
+            id: dict["id"] as? String,
+            live: live,
             haystack: fields.joined(separator: " ").lowercased()
         )
     }

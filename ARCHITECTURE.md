@@ -66,6 +66,7 @@ curl http://127.0.0.1:10010/backend-api/codex/usage  # 订阅额度: plan_type +
 | `stream` / `elapsed_ms` | 客户端是否要流式 + 从收到请求到响应结束的耗时 |
 | `req_bytes` / `res_bytes` / `model` | 两侧 body 字节数 + 请求里的 model |
 | `incomplete` | 仅异常时出现: `客户端断开` / `上游流中断: ...` |
+| `id` | 进程启动时刻 (hex ms) + 进程内序号, 跨重启不撞号; 与进行中那条同 id -> 查看器据此交接选中态; 0.13.4 之前的行没有 |
 | `req_headers` / `req` | 客户端发来的 header 与 body 原样 |
 | `res_headers` / `res` | 回给客户端的 header 与 body (SSE 存整段原文) |
 | `upstream` | 上游那一腿: `method` / `url` / `status` / `req_headers` (注入 CLI 身份后的实际值) / `res_headers` (含 `request-id`、限流头) / `req_body` (仅当本层改写过, 未改写即等同 `req`) |
@@ -89,12 +90,17 @@ curl http://127.0.0.1:10010/backend-api/codex/usage  # 订阅额度: plan_type +
 - 核心内容单段超 128KB / 全文超 4MB 截断展示, 提示切「原始报文」看全文 (日志文件里一律全量)
 - 每面板可 Copy (复制当前视图的文本)
 - 顶栏 Follow 自动读入新记录 (选中行不跳走), 日期下拉切换历史, 过滤框按 path / model / status / surface 多词 AND
+- 进行中: 记录要等响应结束才落盘 -> 请求一进来就登记在代理内存 (`reqlog` 的进行中表, 落盘后注销; Drop 兜底 -> 无泄漏, daemon 退出即清空), 经 `:10020/api/inflight` (摘要) + `/api/inflight/{id}` (与日志行同形状的整行快照, 响应体截至此刻, 带 `inflight: true`) 读出
+  - 列表置顶 (只在看最新一天时), 状态列 `…` / `200…` 区别于 `0` (没等到响应); 选中则每拍刷新详情且保住滚动位置, 贴底的继续贴底
+  - 交接: 每拍先取进行中再扫文件, 代理侧先落盘再注销 -> 同一条最多两边都有 (按 `id` 去重, 以文件为准), 不会两边都没有; 选中态按 `id` 保持, 落盘后详情就地换成最终记录
+  - 列表 Time 列: 进行中 = 请求进来的时刻, 落盘后 = 行的 `ts` (结束时刻)
 - 数据只读: 记录由代理写, 查看器从不写回
 
 差异只在服务操作上:
 
 - 浏览器版 (`:10020`): 操作直接调进程内的同一套实现, 不 exec CLI; `Console` 面板跑 Status / Models / Login / Logout / Stop 并回显。**`start` 例外** —— 页面由代理进程本身提供, 进程没起来时页面也不存在, 只能在终端执行
 - macOS app (`app/`, SwiftPM + AppKit, 零第三方依赖): 全部转调 CLI 子进程 (`Console…` 面板实时回显), 因此 Start 也能点; app 不复刻任何判断
+  - 唯一的网络读取 = 进行中记录 (`http://127.0.0.1:10020/api/inflight`, 1s 超时); 代理没在跑 = 没有进行中, 不报错; Info.plist 开 `NSAllowsLocalNetworking` (明文 http 到回环)
 - Login 的授权回调端口写死在上游 client_id allow-list -> 浏览器只会开在跑着代理的那台机器上, 与从哪台机器点的无关
 
 ## 架构
@@ -149,7 +155,7 @@ src/convert/ + sse.rs          Chat Completions <-> OpenAI Responses (codex.rs) 
 src/reqlog.rs                  往返记录: 一行一次 req/res + 按天分文件 (不清理) + logs 摘要
 src/{auth,oauth,store}.rs      凭证内存态 / 到期预判 / 单飞刷新; PKCE + 本机回调 + 两家 token 换取·刷新; auth.json 原子写 0600
 src/provider.rs                协议面 <-> 端口 / 订阅映射 + 两家上游常量 (client_id / endpoint / CLI 冒充参数)
-src/webui.rs + webui/app.html  浏览器查看器: 只读接口 (日期 / 增量索引 / 整行原文) + 状态 + 服务操作; 前端单文件 include_str! 进二进制, 零外部资源
+src/webui.rs + webui/app.html  浏览器查看器: 只读接口 (日期 / 增量索引 / 整行原文 / 进行中) + 状态 + 服务操作; 前端单文件 include_str! 进二进制, 零外部资源
 scripts/install-local.sh       本机预部署总入口 = 本机架构构建 + 装 /Applications + 链接终端命令 (→ workflow.md); 只给开发用, 用户侧不跑脚本
 scripts/make-dist.sh           分发打包: arm64 / x86_64 各构建一套 -> dist/ 下 dmg + SHA256SUMS + release notes
 .github/workflows/release.yml  打 tag 即发版: 验证 + 跑 make-dist.sh + 产物传 GitHub Release (CI 是脚本的薄壳, 本机可复现)
@@ -159,6 +165,7 @@ app/Sources/jj-agentic-proxy/
   MainViewController.swift + BodyPane.swift            列表 / 过滤 / follow / 详情绑定 + 单 body 面板 (等宽只读 + Copy)
   CoreContent.swift                                    核心内容视图: SSE 重建 + 三方言归一 + 纯文本排版
   TrafficRecord.swift + TrafficReader.swift            行首摘要解析 + 日期枚举 / 增量索引 / 按 (offset, length) 现取全文
+  LiveFeed.swift                                       进行中记录: 经查看器端口取摘要列表 + 整行快照
   ConsoleWindowController.swift + CommandRunner.swift  CLI 控制台面板 + 子进程输出实时回吐
   main.swift + AppDelegate.swift + MainMenu.swift      入口 (`--snapshot <png>` 界面自检) / 主窗口 + 尺寸持久化 / 主菜单
   CLIInstall.swift                                     终端命令入口: 打开 app 时检查 ~/.local/bin symlink, 缺则弹窗一键建 + 摘 quarantine + `--version` 自检
