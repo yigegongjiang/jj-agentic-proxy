@@ -258,6 +258,12 @@ struct RecordOut {
     model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     incomplete: Option<String>,
+    /// 失败时错误信封里的那句话; 旧版本写的行没有
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    /// 归一后的 token 用量, 原样转给前端; 旧版本写的行没有
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tokens: Option<Value>,
     /// 与进行中那条同 id; 旧版本写的行没有
     #[serde(skip_serializing_if = "Option::is_none")]
     id: Option<String>,
@@ -385,6 +391,8 @@ fn parse_record(line: &[u8], seq: usize, offset: u64) -> Option<RecordOut> {
         res_bytes: num("res_bytes"),
         model: opt("model"),
         incomplete: opt("incomplete"),
+        error: opt("error"),
+        tokens: v.get("tokens").filter(|t| t.is_object()).cloned(),
         id: opt("id"),
     })
 }

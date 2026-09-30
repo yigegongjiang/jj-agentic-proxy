@@ -22,7 +22,12 @@ nonisolated enum CoreContent {
         switch kind {
         case .responses:
             appendBlock(&doc, "instructions", text: contentText(dict["instructions"]))
-            appendTurns(&doc, items(dict["input"]))
+            // input 可以直接是一句字符串 (= 单轮 user)
+            if let s = dict["input"] as? String {
+                appendBlock(&doc, "[1] user", text: s)
+            } else {
+                appendTurns(&doc, items(dict["input"]))
+            }
         default:
             appendBlock(&doc, "system", text: contentText(dict["system"]))
             appendTurns(&doc, items(dict["messages"]))
@@ -689,7 +694,7 @@ nonisolated enum CoreContent {
     }
 
     private static func flatten(_ d: [String: Any], prefix: String, into out: inout [String]) {
-        for key in d.keys.sorted() {
+        for key in d.keys.sorted() where key != "attribution" { // Responses: 逐条用量明细, 与顶层合计重复
             let name = prefix.isEmpty ? key : "\(prefix).\(key)"
             switch d[key] {
             case let n as NSNumber where n.intValue != 0:

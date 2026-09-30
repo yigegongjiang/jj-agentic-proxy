@@ -21,7 +21,7 @@
 
 - CLI 往返记录: `jj-agentic-proxy logs -n 20` 看摘要; 原始行 `jq` 直接读 `~/.config/jj-agentic-proxy/log/<日期>.jsonl`
 - app 快编: `cd app && swift build` -> `./.build/debug/jj-agentic-proxy`
-- app 界面自检 (不需录屏授权): `./.build/debug/jj-agentic-proxy --snapshot /tmp/app.png` -> 离屏渲染主窗口, 直接看 PNG
+- app 界面自检 (不需录屏授权): `./.build/debug/jj-agentic-proxy --snapshot /tmp/app.png [--filter <词>]` -> 离屏渲染主窗口, 直接看 PNG; `--filter` 预填过滤框 -> 首行即想看的那条
 - 磁盘吃紧时 `./scripts/clean.sh` (先 `--dry-run` 看体积)
 - 改完代理行为后先 `cargo build --release` + `./target/release/jj-agentic-proxy start` 再打真实请求验证: daemon 跟着这份二进制跑, 不碰 `/Applications`; 与已装版共用 pid 文件 + 端口, start 自带 restart -> 不会双实例
 

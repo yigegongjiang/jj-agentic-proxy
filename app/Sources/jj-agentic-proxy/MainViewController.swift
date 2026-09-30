@@ -35,8 +35,11 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
     private let searchField = NSSearchField()
     private let dayPopup = NSPopUpButton()
     private let followCheck = NSButton(checkboxWithTitle: "Follow", target: nil, action: nil)
+    private let anomalyCheck = NSButton(checkboxWithTitle: "只看异常", target: nil, action: nil)
     private let countLabel = NSTextField(labelWithString: "")
     private let tableView = NSTableView()
+    private let headLabel = NSTextField(labelWithString: "")
+    private let alertLabel = NSTextField(wrappingLabelWithString: "")
     private let metaLabel = NSTextField(labelWithString: "")
     private let legPicker = NSSegmentedControl(labels: ["Client ↔ Proxy", "Proxy ↔ Upstream"],
                                                trackingMode: .selectOne, target: nil, action: nil)
@@ -50,17 +53,17 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
     private let runner = CommandRunner()
     private var console: ConsoleWindowController?
 
-    // method 并进 endpoint, req / res 字节数合成一列 -> 列数压到能全部塞进左半窗。
+    // endpoint 去掉公共前缀 + POST 不写, 字节数只留在详情面板标题 -> 让位给 model 与 token 用量。
     // minW = 该列内容的实际下限: sizeToFit 按比例伸缩时不会把它压到截断。
     private static let columns: [(id: String, title: String, width: CGFloat, minW: CGFloat,
                                   mono: Bool, right: Bool)] = [
-        ("time", "Time", 92, 92, true, false),
-        ("surface", "Surface", 92, 92, false, false),
-        ("path", "Endpoint", 156, 110, false, false), // 唯一可被压缩的列
-        ("model", "Model", 104, 104, false, false),
-        ("status", "Status", 48, 48, true, true),
-        ("took", "Took", 52, 52, true, true),
-        ("bytes", "Req / Res", 104, 104, true, true),
+        ("time", "Time", 64, 64, true, false),
+        ("surface", "Surface", 96, 96, false, false),
+        ("path", "Endpoint", 128, 96, false, false),
+        ("model", "Model", 156, 120, false, false),
+        ("status", "Status", 58, 58, true, true),
+        ("took", "Took", 50, 50, true, true),
+        ("tokens", "Tokens in → out", 118, 104, true, true),
     ]
 
     // MARK: - 装配
@@ -141,11 +144,16 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         followCheck.font = .systemFont(ofSize: 11)
         followCheck.toolTip = "自动读入新写入的往返记录"
 
+        anomalyCheck.target = self
+        anomalyCheck.action = #selector(anomalyChanged)
+        anomalyCheck.font = .systemFont(ofSize: 11)
+        anomalyCheck.toolTip = "没等到响应 / 4xx 5xx / 中途断开 / 流里报错"
+
         countLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
         countLabel.textColor = .secondaryLabelColor
         countLabel.alignment = .right
 
-        let items: [NSView] = [searchField, dayPopup, followCheck, countLabel]
+        let items: [NSView] = [searchField, dayPopup, followCheck, anomalyCheck, countLabel]
         for v in items {
             v.translatesAutoresizingMaskIntoConstraints = false
             box.addSubview(v)
@@ -156,7 +164,8 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
             searchField.trailingAnchor.constraint(equalTo: dayPopup.leadingAnchor, constant: -10),
             dayPopup.widthAnchor.constraint(greaterThanOrEqualToConstant: 116),
             dayPopup.trailingAnchor.constraint(equalTo: followCheck.leadingAnchor, constant: -12),
-            followCheck.trailingAnchor.constraint(equalTo: countLabel.leadingAnchor, constant: -12),
+            followCheck.trailingAnchor.constraint(equalTo: anomalyCheck.leadingAnchor, constant: -12),
+            anomalyCheck.trailingAnchor.constraint(equalTo: countLabel.leadingAnchor, constant: -12),
             countLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 84),
             countLabel.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -12),
         ])
@@ -173,6 +182,15 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         tableScroll.autohidesScrollers = true
         tableScroll.borderType = .noBorder
 
+        // 详情顶部三行: 结果 / 模型 / 耗时 / 用量 (醒目) -> 异常原因 (红, 仅异常时) -> 定位信息 (灰)
+        headLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        headLabel.lineBreakMode = .byTruncatingTail
+        headLabel.translatesAutoresizingMaskIntoConstraints = false
+        alertLabel.font = .systemFont(ofSize: 12)
+        alertLabel.textColor = .systemRed
+        alertLabel.maximumNumberOfLines = 3
+        alertLabel.isSelectable = true
+        alertLabel.translatesAutoresizingMaskIntoConstraints = false
         metaLabel.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
         metaLabel.textColor = .secondaryLabelColor
         metaLabel.lineBreakMode = .byTruncatingTail
@@ -202,16 +220,27 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         detailSplit.addArrangedSubview(resPane)
         detailSplit.translatesAutoresizingMaskIntoConstraints = false
 
+        // 告警行空时收成 0 高 -> 正常记录不留空洞
+        let heads = NSStackView(views: [headLabel, alertLabel, metaLabel])
+        heads.orientation = .vertical
+        heads.alignment = .leading
+        heads.spacing = 3
+        heads.detachesHiddenViews = true
+        heads.translatesAutoresizingMaskIntoConstraints = false
+
         let detail = NSView()
-        detail.addSubview(metaLabel)
+        detail.addSubview(heads)
         detail.addSubview(legPicker)
         detail.addSubview(viewPicker)
         detail.addSubview(detailSplit)
         NSLayoutConstraint.activate([
-            metaLabel.topAnchor.constraint(equalTo: detail.topAnchor, constant: 4),
-            metaLabel.leadingAnchor.constraint(equalTo: detail.leadingAnchor, constant: 10),
-            metaLabel.trailingAnchor.constraint(equalTo: detail.trailingAnchor, constant: -10),
-            legPicker.topAnchor.constraint(equalTo: metaLabel.bottomAnchor, constant: 6),
+            heads.topAnchor.constraint(equalTo: detail.topAnchor, constant: 4),
+            heads.leadingAnchor.constraint(equalTo: detail.leadingAnchor, constant: 10),
+            heads.trailingAnchor.constraint(equalTo: detail.trailingAnchor, constant: -10),
+            headLabel.widthAnchor.constraint(lessThanOrEqualTo: heads.widthAnchor),
+            alertLabel.widthAnchor.constraint(equalTo: heads.widthAnchor),
+            metaLabel.widthAnchor.constraint(lessThanOrEqualTo: heads.widthAnchor),
+            legPicker.topAnchor.constraint(equalTo: heads.bottomAnchor, constant: 6),
             legPicker.leadingAnchor.constraint(equalTo: detail.leadingAnchor, constant: 10),
             viewPicker.centerYAnchor.constraint(equalTo: legPicker.centerYAnchor),
             viewPicker.leadingAnchor.constraint(greaterThanOrEqualTo: legPicker.trailingAnchor, constant: 10),
@@ -363,19 +392,22 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         let terms = searchField.stringValue.lowercased()
             .split(whereSeparator: { $0 == " " || $0 == "\t" })
             .map(String.init)
-        let hit = { (rec: TrafficRecord) in terms.allSatisfy { rec.haystack.contains($0) } }
+        let onlyBad = anomalyCheck.state == .on
+        let hit = { (rec: TrafficRecord) in
+            (!onlyBad || rec.anomaly) && terms.allSatisfy { rec.haystack.contains($0) }
+        }
         // 先取进行中再扫文件 -> 刚落盘那条两边都有: 以文件为准
         let pending = day.isEmpty || day == latestDay
             ? live.filter { !ids.contains($0.id ?? "") }
             : []
-        let done = terms.isEmpty ? all : all.filter(hit)
+        let filtered = !terms.isEmpty || onlyBad
+        let done = filtered ? all.filter(hit) : all
         rows = Array(pending.filter(hit).reversed()) + done.reversed()
 
         restoringSelection = true
         tableView.reloadData()
         restoringSelection = false
-        let total = terms.isEmpty ? "\(all.count) 条" : "\(rows.count) / \(all.count + pending.count) 条"
-        countLabel.stringValue = pending.isEmpty ? total : "\(total) · \(pending.count) 进行中"
+        countLabel.stringValue = countText(pending: pending.count, filtered: filtered)
 
         // 选中态按键恢复: follow 追加新记录时不跳走; 进行中那条落盘后键不变, 详情就地换成最终记录
         if let key = selectedKey, let idx = rows.firstIndex(where: { $0.key == key }) {
@@ -392,6 +424,21 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         }
     }
 
+    /// `457 条 · 3 异常 · 1 进行中 · in 1.2M / out 45K`: 异常数与当天用量不用点开就能看到
+    private func countText(pending: Int, filtered: Bool) -> String {
+        var parts = [filtered ? "\(rows.count) / \(all.count + pending) 条" : "\(all.count) 条"]
+        let bad = all.reduce(0) { $0 + ($1.anomaly ? 1 : 0) }
+        if bad > 0 { parts.append("\(bad) 异常") }
+        if pending > 0 { parts.append("\(pending) 进行中") }
+        let (input, output) = all.reduce((0, 0)) { acc, r in
+            (acc.0 + (r.tokens?.input ?? 0), acc.1 + (r.tokens?.output ?? 0))
+        }
+        if input + output > 0 {
+            parts.append("in \(TrafficRecord.count(input)) / out \(TrafficRecord.count(output))")
+        }
+        return parts.joined(separator: " · ")
+    }
+
     func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
@@ -404,28 +451,31 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         let field = cell.textField
         field?.textColor = .labelColor
         switch column.identifier.rawValue {
-        case "time": field?.stringValue = rec.clock
+        case "time": field?.stringValue = rec.shortClock
         case "surface":
             field?.stringValue = rec.surface
             field?.textColor = .secondaryLabelColor
-        case "path": field?.stringValue = "\(rec.method) \(rec.path)"
+        case "path": field?.stringValue = rec.endpoint
         case "model": field?.stringValue = rec.model ?? "—"
         case "status":
             field?.stringValue = rec.statusText
             field?.textColor = statusColor(rec)
         case "took": field?.stringValue = rec.elapsedText
-        case "bytes":
-            field?.stringValue = "\(TrafficRecord.size(rec.reqBytes)) / \(TrafficRecord.size(rec.resBytes))"
+        case "tokens":
+            field?.stringValue = rec.tokensText
+            field?.textColor = rec.tokens == nil ? .tertiaryLabelColor : .labelColor
         default: field?.stringValue = ""
         }
+        // 悬停整行即见异常原因, 不用点开
+        cell.toolTip = rec.problem.map { "⚠︎ \($0)" }
         return cell
     }
 
     private func statusColor(_ rec: TrafficRecord) -> NSColor {
         if rec.live { return .systemBlue }
         switch rec.status {
-        case 0: return .tertiaryLabelColor // 没等到响应
-        case 200..<300: return .systemGreen
+        case 0: return .systemRed // 没等到响应
+        case 200..<300: return rec.problem == nil ? .systemGreen : .systemOrange // 断开 / 流里报错
         case 300..<400: return .systemTeal
         case 400..<500: return .systemOrange
         default: return .systemRed
@@ -467,6 +517,9 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         if !quiet { detail = nil }
         guard let rec else {
             shownLive = false
+            headLabel.stringValue = ""
+            alertLabel.stringValue = ""
+            alertLabel.isHidden = true
             metaLabel.stringValue = ""
             reqPane.text = ""
             resPane.text = ""
@@ -474,6 +527,12 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
             resPane.sizeText = ""
             return
         }
+        headLabel.stringValue = rec.headline
+        // 与列表状态列同色: 失败红, 200 但断开 / 流里报错橙
+        headLabel.textColor = rec.anomaly ? statusColor(rec) : .labelColor
+        alertLabel.textColor = statusColor(rec)
+        alertLabel.stringValue = rec.problem.map { "⚠︎ \($0)" } ?? ""
+        alertLabel.isHidden = rec.problem == nil
         metaLabel.stringValue = rec.summary
         reqPane.sizeText = TrafficRecord.size(rec.reqBytes)
         resPane.sizeText = TrafficRecord.size(rec.resBytes)
@@ -524,6 +583,8 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         } else {
             reqPane.text = req
             resPane.text = res
+            // 长对话: 请求体直接停在最新一轮 (对话轮次的分段标题是 `── [N] role`)
+            if core { reqPane.scrollToLast("\n── [") }
         }
     }
 
@@ -564,6 +625,10 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         }
     }
 
+    @objc private func anomalyChanged() {
+        applyFilter()
+    }
+
     @objc private func followChanged() {
         if followCheck.state == .on { tick() }
     }
@@ -579,6 +644,11 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
     @objc func refresh(_ sender: Any?) {
         reloadDays(selecting: day.isEmpty ? nil : day)
         refreshStatus()
+    }
+
+    /// `--snapshot --filter`: 首次加载前预填过滤词
+    func preset(filter: String) {
+        searchField.stringValue = filter
     }
 
     @objc func focusSearch(_ sender: Any?) {

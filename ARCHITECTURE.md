@@ -66,6 +66,8 @@ curl http://127.0.0.1:10010/backend-api/codex/usage  # 订阅额度: plan_type +
 | `stream` / `elapsed_ms` | 客户端是否要流式 + 从收到请求到响应结束的耗时 |
 | `req_bytes` / `res_bytes` / `model` | 两侧 body 字节数 + 请求里的 model |
 | `incomplete` | 仅异常时出现: `客户端断开` / `上游流中断: ...` |
+| `error` | 仅失败时出现: 错误信封里那句话 (状态码 >= 400 / 200 流里的 `error` 事件), ≤ 200 字符; 0.13.5 之前的行没有 |
+| `tokens` | 响应带 usage 时出现: `input` / `output` / `cached` / `cache_write` (0 省略); 三方言归一, `input` 一律含缓存 (Anthropic 加回 `cache_read` + `cache_creation`), 多帧逐字段取大; 0.13.5 之前的行没有 |
 | `id` | 进程启动时刻 (hex ms) + 进程内序号, 跨重启不撞号; 与进行中那条同 id -> 查看器据此交接选中态; 0.13.4 之前的行没有 |
 | `req_headers` / `req` | 客户端发来的 header 与 body 原样 |
 | `res_headers` / `res` | 回给客户端的 header 与 body (SSE 存整段原文) |
@@ -82,6 +84,10 @@ curl http://127.0.0.1:10010/backend-api/codex/usage  # 订阅额度: plan_type +
 唯一职责是把上面的记录读给人看, 代理能力一概不实现. 两份业务功能对齐, 读同一份 `.jsonl`, 同一套视图与排版:
 
 - 左列表 (新 -> 旧) + 右上下面板: 选中一条即绑定展示它的 Request / Response
+  - 列: Time (秒) / Surface / Endpoint (去 query 与 `/v1` `/backend-api` 前缀, POST 不写) / Model / Status / Took / Tokens (`in → out`); 字节数只在面板标题
+  - 异常 = `status` 0 / >= 400 / 带 `incomplete` 或 `error` (200 开头也算): 状态列 `200 ⚠︎` 橙 / 失败红, 悬停出原因; 「只看异常」勾选过滤; 计数栏带当天异常数 + token 合计
+  - 详情顶部三行: 结果 · model · 耗时 · 用量 (含缓存命中率) / 异常原因 (仅异常) / 时刻 · 完整请求行 · surface · id
+  - 请求面板 (核心内容) 打开即停在最后一轮 (`── [N]`), 长对话不用滚过 system
 - 两组切换互不干扰: `Client ↔ Proxy` / `Proxy ↔ Upstream` 选哪条腿, `核心内容` / `原始报文` 选哪种读法 (⌘D)
 - 核心内容 (默认): 几百帧碎 SSE 先重建成完整消息再排纯文本, 请求侧从嵌套 JSON 抽出对话轮次 (system 或 `instructions` + 逐轮消息, 轮内工具调用与结果缩进挂在该轮下), 响应给方言 / 帧数 / 是否收到收尾事件 / usage 摘要后按产出顺序排 text / thinking / tool_call 段; 工具参数逐帧拼回完整 JSON, 流被截断没拼全就原样给
 - 核心内容认三种方言 (与三个协议面一致): Anthropic Messages / OpenAI Chat Completions / OpenAI Responses, 流式与非流式同一套渲染; 认不出就每帧压成一行, 非对话请求 (`/v1/models`、`count_tokens`) 回退成原 JSON -> 永远给得出东西
@@ -167,7 +173,7 @@ app/Sources/jj-agentic-proxy/
   TrafficRecord.swift + TrafficReader.swift            行首摘要解析 + 日期枚举 / 增量索引 / 按 (offset, length) 现取全文
   LiveFeed.swift                                       进行中记录: 经查看器端口取摘要列表 + 整行快照
   ConsoleWindowController.swift + CommandRunner.swift  CLI 控制台面板 + 子进程输出实时回吐
-  main.swift + AppDelegate.swift + MainMenu.swift      入口 (`--snapshot <png>` 界面自检) / 主窗口 + 尺寸持久化 / 主菜单
+  main.swift + AppDelegate.swift + MainMenu.swift      入口 (`--snapshot <png> [--filter <词>]` 界面自检) / 主窗口 + 尺寸持久化 / 主菜单
   CLIInstall.swift                                     终端命令入口: 打开 app 时检查 ~/.local/bin symlink, 缺则弹窗一键建 + 摘 quarantine + `--version` 自检
   ProxyPaths.swift                                     CLI 定位 (首选自身同目录那份) / 日志目录
 ```

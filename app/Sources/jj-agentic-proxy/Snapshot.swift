@@ -4,7 +4,7 @@ import AppKit
 // AI Only 工程需要能自检界面, 而截屏 API 要录屏授权 -> 用视图自身的离屏绘制, 无需任何权限。
 nonisolated enum Snapshot {
     @MainActor
-    static func run(path: String) -> Never {
+    static func run(path: String, filter: String?) -> Never {
         let app = NSApplication.shared
         app.setActivationPolicy(.prohibited) // 不进 Dock, 不抢焦点
         let vc = MainViewController()
@@ -15,6 +15,7 @@ nonisolated enum Snapshot {
             defer: false
         )
         window.contentViewController = vc
+        if let filter { vc.preset(filter: filter) }
         // 设 contentViewController 会把窗口缩到 fitting size -> 显式定回目标尺寸
         window.setContentSize(NSSize(width: 1180, height: 740))
         // 离屏 bitmap 没有窗口背板, 补一层背景色, 否则浅色文字落在透明底上看不见

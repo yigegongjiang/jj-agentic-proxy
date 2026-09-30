@@ -80,15 +80,22 @@ tbody tr { cursor: default; }
 .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .right { text-align: right; }
 .dim { color: var(--fg-dim); }
-.s0 { color: var(--fg-faint); } .s2 { color: var(--green); } .s3 { color: var(--teal); }
+.s0 { color: var(--red); } .swarn { color: var(--orange); } .faint { color: var(--fg-faint); } .s2 { color: var(--green); } .s3 { color: var(--teal); }
 .s4 { color: var(--orange); } .s5 { color: var(--red); } .slive { color: var(--accent); }
 tbody tr.live td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
 #empty { padding: 24px 14px; color: var(--fg-dim); }
 
 /* ---------- 详情 ---------- */
+/* 详情顶部三行: 结果 / 模型 / 耗时 / 用量 (醒目) -> 异常原因 (仅异常时) -> 定位信息 (灰) */
+#headline {
+  font-size: 13px; font-weight: 600; padding: 6px 10px 0; flex: none;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#alert { font-size: 12px; padding: 2px 10px 0; flex: none; word-break: break-word; user-select: text; }
+#alert:empty { display: none; }
 #meta {
   font-family: var(--mono); font-size: 11px; color: var(--fg-dim);
-  padding: 6px 10px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: none;
+  padding: 2px 10px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: none;
 }
 #picks { display: flex; align-items: center; gap: 8px; padding: 6px 10px; flex: none; }
 .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; }
@@ -144,6 +151,7 @@ tbody tr.live td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
   <input id="q" type="search" placeholder="Filter: path / model / status / surface" spellcheck="false" autocomplete="off">
   <select id="days"></select>
   <label class="check"><input id="follow" type="checkbox" checked> Follow</label>
+  <label class="check" title="没等到响应 / 4xx 5xx / 中途断开 / 流里报错"><input id="bad" type="checkbox"> 只看异常</label>
   <span id="count"></span>
 </div>
 
@@ -151,13 +159,13 @@ tbody tr.live td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
   <div id="list">
     <table>
       <thead><tr>
-        <th style="width:116px">Time</th>
-        <th style="width:104px">Surface</th>
+        <th style="width:72px">Time</th>
+        <th style="width:96px">Surface</th>
         <th>Endpoint</th>
-        <th style="width:112px">Model</th>
-        <th style="width:52px" class="right">Status</th>
+        <th style="width:168px">Model</th>
+        <th style="width:60px" class="right">Status</th>
         <th style="width:56px" class="right">Took</th>
-        <th style="width:104px" class="right">Req / Res</th>
+        <th style="width:112px" class="right">Tokens in → out</th>
       </tr></thead>
       <tbody id="rows"></tbody>
     </table>
@@ -165,6 +173,8 @@ tbody tr.live td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
   </div>
   <div id="vgrip"></div>
   <div id="detail">
+    <div id="headline"></div>
+    <div id="alert"></div>
     <div id="meta"></div>
     <div id="picks">
       <span class="seg" id="leg">
@@ -343,6 +353,7 @@ function usageLine(v) {
 
 function flattenUsage(d, prefix, out) {
   for (const key of Object.keys(d).sort()) {
+    if (key === 'attribution') continue; // Responses: 逐条消息的用量明细, 与顶层合计重复
     const name = prefix ? `${prefix}.${key}` : key;
     const v = d[key];
     if (typeof v === 'number' && Math.trunc(v) !== 0) {
@@ -947,7 +958,9 @@ const Core = {
 
     if (kind === 'responses') {
       appendBlock(doc, 'instructions', contentText(dict.instructions));
-      appendTurns(doc, asArr(dict.input));
+      // input 可以直接是一句字符串 (= 单轮 user)
+      if (typeof dict.input === 'string') appendBlock(doc, '[1] user', dict.input);
+      else appendTurns(doc, asArr(dict.input));
     } else {
       appendBlock(doc, 'system', contentText(dict.system));
       appendTurns(doc, asArr(dict.messages));
@@ -1088,9 +1101,43 @@ const clockOf = ts => {
 /** 选中态的键: 有 id 用 id (进行中 -> 落盘后同一个键, 选中不丢), 旧版本写的行退回文件内序号。 */
 const keyOf = r => r.id ? `i:${r.id}` : `s:${r.seq}`;
 
-// 进行中: 还没响应头 = …, 有了 = 状态码 + …
+/** 异常原因, 一句话: 列表 tooltip 与详情告警行共用。 */
+const problemOf = r => [r.incomplete, r.error].filter(Boolean).join(' · ') || null;
+
+/** 没成功的往返: 没等到响应 / 4xx 5xx / 中途断开 / 流里报错 (200 开头也算)。进行中的不算。 */
+const isAnomaly = r => !r._live && (r.status === 0 || r.status >= 400 || !!problemOf(r));
+
+// 进行中: 还没响应头 = …, 有了 = 状态码 + …; 带状态码但没成功 (断开 / 流里报错) 加 ⚠︎
 const statusText = r => r._live ? (r.status ? `${r.status}…` : '…')
-  : r.status === 0 ? '—' : String(r.status);
+  : r.status === 0 ? '—' : problemOf(r) && r.status < 400 ? `${r.status} ⚠︎` : String(r.status);
+
+/** 列表用: 去掉 query 与 `/v1` / `/backend-api` 前缀, POST 不写 -> 不再被截成 `/v1/...mpletions`。 */
+function endpointOf(r) {
+  let p = r.path.split('?')[0];
+  for (const prefix of ['/v1/', '/backend-api/']) {
+    if (p.startsWith(prefix)) { p = p.slice(prefix.length); break; }
+  }
+  if (p.startsWith('/')) p = p.slice(1);
+  return r.method === 'POST' ? p : `${r.method} ${p}`;
+}
+
+function countText(n) {
+  if (n < 1000) return String(n);
+  if (n < 1e6) return `${(n / 1000).toFixed(1)}K`;
+  return `${(n / 1e6).toFixed(2)}M`;
+}
+
+const tokensText = r => r.tokens ? `${countText(r.tokens.input || 0)} → ${countText(r.tokens.output || 0)}` : '—';
+
+function tokensDetail(r) {
+  const t = r.tokens;
+  if (!t) return null;
+  let out = `输入 ${countText(t.input || 0)}`;
+  if (t.cached && t.input) out += ` (缓存 ${Math.floor(t.cached * 100 / t.input)}%)`;
+  out += ` → 输出 ${countText(t.output || 0)}`;
+  if (t.cache_write) out += ` · 写缓存 ${countText(t.cache_write)}`;
+  return out;
+}
 
 const elapsedText = r => r.elapsed_ms < 1000 ? `${r.elapsed_ms}ms` : `${(r.elapsed_ms / 1000).toFixed(1)}s`;
 
@@ -1101,25 +1148,34 @@ function sizeText(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
 }
 
+/** 详情首行: 结果 + 模型 + 耗时 + 用量 (最常要看的几项, 不被长路径挤出视野)。 */
+function headlineOf(r) {
+  const out = [r._live ? (r.status ? `${r.status} · 进行中` : '进行中') : r.status ? String(r.status) : '没等到响应'];
+  if (r.model) out.push(r.model);
+  out.push(elapsedText(r));
+  const t = tokensDetail(r);
+  if (t) out.push(t);
+  return out.join(' · ');
+}
+
+/** 详情次行: 定位信息。不重复 req / res 字节数 (两个面板标题里已有)。 */
 function summaryOf(r) {
-  let out = `${clockOf(r.ts)} · ${r.method} ${r.path} · ${r.surface} · ${statusText(r)} · ${elapsedText(r)}`;
-  if (r.model) out += ` · ${r.model}`;
+  let out = `${clockOf(r.ts)} · ${r.method} ${r.path} · ${r.surface}`;
   if (r.stream) out += ' · stream';
-  if (r._live) out += ' · 进行中';
-  if (r.incomplete) out += ` · ⚠︎ ${r.incomplete}`;
+  if (r.id) out += ` · ${r.id}`;
   return out;
 }
 
 function haystackOf(r) {
   if (r._hay === undefined) {
     r._hay = [r.ts, r.surface, r.method, r.path, r.status === 0 ? '' : String(r.status),
-             r.model || '', r.incomplete || '', r._live ? '进行中 live' : ''].join(' ').toLowerCase();
+             r.model || '', r.incomplete || '', r.error || '', r._live ? '进行中 live' : ''].join(' ').toLowerCase();
   }
   return r._hay;
 }
 
 const statusClass = r => r._live ? 'slive' : r.status === 0 ? 's0'
-  : r.status < 300 ? 's2' : r.status < 400 ? 's3' : r.status < 500 ? 's4' : 's5';
+  : r.status < 300 ? (problemOf(r) ? 'swarn' : 's2') : r.status < 400 ? 's3' : r.status < 500 ? 's4' : 's5';
 
 /* ---------- 日期 / 扫描 ---------- */
 async function reloadDays(wanted) {
@@ -1190,17 +1246,24 @@ const showsLive = () => !S.day || S.day === S.latestDay;
 /* ---------- 过滤 / 列表 ---------- */
 function applyFilter() {
   const terms = $('q').value.toLowerCase().split(/[\s\t]+/).filter(Boolean);
-  const hit = r => terms.every(t => haystackOf(r).includes(t));
+  const onlyBad = $('bad').checked;
+  const hit = r => (!onlyBad || isAnomaly(r)) && terms.every(t => haystackOf(r).includes(t));
   // 先取进行中再扫文件 -> 刚落盘那条两边都有: 以文件为准
   const live = showsLive() ? S.live.filter(r => !S.ids.has(r.id)) : [];
-  const done = terms.length ? S.all.filter(hit) : S.all;
+  const filtered = terms.length > 0 || onlyBad;
+  const done = filtered ? S.all.filter(hit) : S.all;
   S.rows = live.filter(hit).reverse().concat(done.slice().reverse());
 
   renderRows();
-  const liveNote = live.length ? ` · ${live.length} 进行中` : '';
-  $('count').textContent = (terms.length
-    ? `${S.rows.length} / ${S.all.length + live.length} 条`
-    : `${S.all.length} 条`) + liveNote;
+  // `457 条 · 3 异常 · 1 进行中 · in 1.2M / out 45K`: 异常数与当天用量不用点开就能看到
+  const parts = [filtered ? `${S.rows.length} / ${S.all.length + live.length} 条` : `${S.all.length} 条`];
+  const bad = S.all.filter(isAnomaly).length;
+  if (bad) parts.push(`${bad} 异常`);
+  if (live.length) parts.push(`${live.length} 进行中`);
+  let input = 0, output = 0;
+  for (const r of S.all) if (r.tokens) { input += r.tokens.input || 0; output += r.tokens.output || 0; }
+  if (input + output) parts.push(`in ${countText(input)} / out ${countText(output)}`);
+  $('count').textContent = parts.join(' · ');
 
   // 选中态按键恢复: follow 追加新记录时不跳走; 进行中那条落盘后键不变, 详情自动换成最终记录
   const idx = S.selectedKey === null ? -1 : S.rows.findIndex(r => keyOf(r) === S.selectedKey);
@@ -1218,19 +1281,21 @@ function renderRows() {
     const tr = document.createElement('tr');
     if (r._live) tr.className = 'live';
     const cells = [
-      ['mono', clockOf(r.ts)],
+      ['mono', clockOf(r.ts).slice(0, 8)],
       ['dim', r.surface],
-      ['', `${r.method} ${r.path}`],
+      ['', endpointOf(r)],
       ['', r.model || '—'],
       [`mono right ${statusClass(r)}`, statusText(r)],
       ['mono right', elapsedText(r)],
-      ['mono right', `${sizeText(r.req_bytes)} / ${sizeText(r.res_bytes)}`],
+      [`mono right${r.tokens ? '' : ' faint'}`, tokensText(r)],
     ];
+    // 悬停整行即见异常原因, 不用点开
+    const problem = problemOf(r);
     for (const [cls, text] of cells) {
       const td = document.createElement('td');
       if (cls) td.className = cls;
       td.textContent = text;
-      td.title = text;
+      td.title = problem ? `⚠︎ ${problem}` : text;
       tr.appendChild(td);
     }
     frag.appendChild(tr);
@@ -1267,6 +1332,8 @@ async function showDetail(rec, quiet = false) {
   if (!quiet) S.detail = null;
   if (!rec) {
     S.shownLive = false;
+    $('headline').textContent = '';
+    $('alert').textContent = '';
     $('meta').textContent = '';
     for (const k of ['req', 'res']) {
       $(`${k}-body`).textContent = '';
@@ -1274,6 +1341,13 @@ async function showDetail(rec, quiet = false) {
     }
     return;
   }
+  // 与列表状态列同色: 失败红, 200 但断开 / 流里报错橙
+  const tone = isAnomaly(rec) ? statusClass(rec) : '';
+  $('headline').textContent = headlineOf(rec);
+  $('headline').className = tone;
+  const problem = problemOf(rec);
+  $('alert').textContent = problem ? `⚠︎ ${problem}` : '';
+  $('alert').className = tone || 'swarn';
   $('meta').textContent = summaryOf(rec);
   $('req-size').textContent = sizeText(rec.req_bytes);
   $('res-size').textContent = sizeText(rec.res_bytes);
@@ -1325,6 +1399,25 @@ function renderDetail(keepScroll = false) {
   $('res-title').textContent = up ? 'Response ← 上游' : 'Response → 客户端';
   setBody($('req-body'), (up ? d.upstreamRequest : d.clientRequest)[key], keepScroll);
   setBody($('res-body'), (up ? d.upstreamResponse : d.clientResponse)[key], keepScroll);
+  // 长对话: 请求体直接停在最新一轮 (对话轮次的分段标题是 `── [N] role`)
+  if (!keepScroll) {
+    scrollToLast($('req-body'), key === 'core' ? '\n── [' : null);
+    $('res-body').scrollTop = 0;
+  }
+}
+
+/** 把最后一处 `marker` 顶到面板首行; 无 marker 回到顶部。全文放得下时浏览器自己夹住。 */
+function scrollToLast(el, marker) {
+  const text = el.textContent;
+  const at = marker ? text.lastIndexOf(marker) : -1;
+  if (at < 0) { el.scrollTop = 0; return; }
+  const range = document.createRange();
+  const node = el.firstChild;
+  if (!node) return;
+  range.setStart(node, at + 1);
+  range.setEnd(node, Math.min(text.length, at + 2));
+  const rect = range.getBoundingClientRect();
+  el.scrollTop += rect.top - el.getBoundingClientRect().top - 8;
 }
 
 /* ---------- 服务状态 ---------- */
@@ -1488,6 +1581,7 @@ draggable($('hgrip'), e => {
 $('q').addEventListener('input', applyFilter);
 $('days').addEventListener('change', e => { S.selectedKey = null; reloadDays(e.target.value); });
 $('follow').addEventListener('change', e => { if (e.target.checked) tick(); });
+$('bad').addEventListener('change', applyFilter);
 
 $('rows').addEventListener('click', e => {
   const tr = e.target.closest('tr');

@@ -124,6 +124,12 @@ struct Line<'a> {
     /// 仅异常时出现: 客户端断开 / 上游流中断。
     #[serde(skip_serializing_if = "Option::is_none")]
     incomplete: Option<&'a str>,
+    /// 仅失败时出现: 错误信封里的那句话 (状态码 >= 400 / 流里的 error 事件), 截到 [`ERROR_CAP`] 字符
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    /// 响应里带 usage 时出现; 三种方言归一 (见 [`Tokens`])
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tokens: Option<Tokens>,
     id: &'a str,
     /// 仅进行中的快照带 (`/api/inflight/{id}`), 落盘行没有
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -148,6 +154,8 @@ impl Inflight {
             // 未改写就不重复存一份 (客户端 req 即上游 req)
             req_body: (leg.req_body != self.req_raw).then(|| payload(&leg.req_body)),
         });
+        let res = payload(&p.res);
+        let (tokens, error) = digest(p.status, &res);
         let line = Line {
             ts,
             surface: self.surface.key(),
@@ -160,12 +168,14 @@ impl Inflight {
             res_bytes: p.res.len(),
             model: self.model.as_deref(),
             incomplete,
+            error,
+            tokens,
             id: &self.id,
             inflight,
             req_headers: &self.req_headers,
             req: &self.req,
             res_headers: &p.res_headers,
-            res: payload(&p.res),
+            res,
             upstream,
         };
         // 全是 String 键 + 已解析的 Value -> 序列化不会失败
@@ -397,6 +407,151 @@ fn payload(raw: &[u8]) -> Value {
         .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(raw).into_owned()))
 }
 
+// ---------- 摘要: token 用量 / 错误 (查看器列表只读摘要段, 不碰 body) ----------
+
+const ERROR_CAP: usize = 200;
+
+/// `input` 一律含缓存命中: OpenAI 两种方言本来就含, Anthropic 的 `input_tokens` 不含 -> 加回
+/// `cache_read` + `cache_creation`, 否则 Claude Code 的请求只显示个位数输入。
+#[derive(Serialize, Default, Clone, Copy, PartialEq, Debug)]
+struct Tokens {
+    input: u64,
+    output: u64,
+    /// 输入里命中缓存的部分
+    #[serde(skip_serializing_if = "is_zero")]
+    cached: u64,
+    /// 本次写入缓存的部分 (Anthropic cache_creation / Responses cache_write)
+    #[serde(skip_serializing_if = "is_zero")]
+    cache_write: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
+impl Tokens {
+    /// 一个 usage 对象 -> 归一; 只读顶层已知字段 (Responses 的 usage 里还嵌着逐条 attribution)。
+    fn of(u: &Value) -> Option<Self> {
+        let n = |ptr: &str| u.pointer(ptr).and_then(Value::as_u64).unwrap_or(0);
+        if !u.is_object() {
+            return None;
+        }
+        let t = if u.get("prompt_tokens").is_some() {
+            Tokens {
+                input: n("/prompt_tokens"),
+                output: n("/completion_tokens"),
+                cached: n("/prompt_tokens_details/cached_tokens"),
+                cache_write: 0,
+            }
+        } else if u.get("cache_read_input_tokens").is_some()
+            || u.get("cache_creation_input_tokens").is_some()
+        {
+            let (read, write) = (
+                n("/cache_read_input_tokens"),
+                n("/cache_creation_input_tokens"),
+            );
+            Tokens {
+                input: n("/input_tokens") + read + write,
+                output: n("/output_tokens"),
+                cached: read,
+                cache_write: write,
+            }
+        } else {
+            Tokens {
+                input: n("/input_tokens"),
+                output: n("/output_tokens"),
+                cached: n("/input_tokens_details/cached_tokens"),
+                cache_write: n("/input_tokens_details/cache_write_tokens"),
+            }
+        };
+        Some(t)
+    }
+
+    /// Anthropic 把用量拆在 message_start / message_delta 两帧, 且计数只增不减 -> 逐字段取大。
+    fn merge(&mut self, o: Self) {
+        self.input = self.input.max(o.input);
+        self.output = self.output.max(o.output);
+        self.cached = self.cached.max(o.cached);
+        self.cache_write = self.cache_write.max(o.cache_write);
+    }
+}
+
+/// 响应体 -> (token 用量, 错误那句话)。解析不了的帧直接跳过: 这里在流收尾的路径上, 绝不 panic。
+fn digest(status: u16, res: &Value) -> (Option<Tokens>, Option<String>) {
+    let mut tokens: Option<Tokens> = None;
+    let mut error: Option<String> = None;
+    let mut absorb = |v: &Value, error: &mut Option<String>| {
+        for u in [
+            v.get("usage"),
+            v.pointer("/message/usage"),
+            v.pointer("/response/usage"),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if let Some(t) = Tokens::of(u) {
+                tokens.get_or_insert_with(Tokens::default).merge(t);
+            }
+        }
+        if error.is_none() {
+            *error = error_text(v);
+        }
+    };
+    match res {
+        Value::Object(_) => {
+            absorb(res, &mut error);
+            if status >= 400 && error.is_none() {
+                error = res
+                    .get("detail")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .or_else(|| Some(res.to_string()));
+            }
+        }
+        Value::String(text) => {
+            for line in text.lines() {
+                let Some(data) = line.strip_prefix("data:") else {
+                    continue;
+                };
+                // 只解析可能有料的帧: 一次流几百帧, 大多是正文增量
+                if !data.contains("usage") && !data.contains("error") {
+                    continue;
+                }
+                if let Ok(v) = serde_json::from_str::<Value>(data.trim()) {
+                    absorb(&v, &mut error);
+                }
+            }
+            if status >= 400 && error.is_none() && !text.trim().is_empty() {
+                error = Some(text.trim().to_string());
+            }
+        }
+        _ => {}
+    }
+    let error = error.map(|e| {
+        let e = e.trim();
+        match e.char_indices().nth(ERROR_CAP) {
+            Some((at, _)) => format!("{}…", &e[..at]),
+            None => e.to_string(),
+        }
+    });
+    (tokens.filter(|t| *t != Tokens::default()), error)
+}
+
+/// 错误信封的那句话: 两家方言 / Responses 的 `response.failed` / 本代理自产, `null` 不算。
+fn error_text(v: &Value) -> Option<String> {
+    let err = [v.get("error"), v.pointer("/response/error")]
+        .into_iter()
+        .flatten()
+        .find(|e| !e.is_null())?;
+    Some(match err {
+        Value::String(s) => s.clone(),
+        e => e
+            .get("message")
+            .and_then(Value::as_str)
+            .map_or_else(|| e.to_string(), str::to_string),
+    })
+}
+
 // ---------- 写入 ----------
 
 struct Writer {
@@ -511,8 +666,15 @@ fn summary(v: &Value) -> String {
     if v["stream"].as_bool() == Some(true) {
         out.push_str(" stream");
     }
+    if let Some(t) = v.get("tokens") {
+        let n = |k: &str| t[k].as_u64().unwrap_or(0);
+        out.push_str(&format!("  tok {}→{}", n("input"), n("output")));
+    }
     if let Some(bad) = v["incomplete"].as_str() {
         out.push_str(&format!("  [{bad}]"));
+    }
+    if let Some(err) = v["error"].as_str() {
+        out.push_str(&format!("  ! {err}"));
     }
     out
 }
@@ -796,6 +958,107 @@ mod tests {
         *WRITER.lock().unwrap() = None;
         *store::TEST_CONFIG_DIR.lock().unwrap() = None;
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 三种方言的 usage 形状取自真实日志; input 一律含缓存。
+    #[test]
+    fn digest_normalizes_usage_across_dialects() {
+        let t = |status, res: Value| digest(status, &res).0.expect("应有用量");
+        // Anthropic SSE: 用量拆两帧, input 要加回缓存
+        let anthropic = concat!(
+            "event: message_start\n",
+            r#"data: {"type":"message_start","message":{"usage":{"input_tokens":3,"cache_creation_input_tokens":100,"cache_read_input_tokens":2000,"output_tokens":1}}}"#,
+            "\n\nevent: content_block_delta\n",
+            r#"data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}"#,
+            "\n\nevent: message_delta\n",
+            r#"data: {"type":"message_delta","usage":{"output_tokens":603}}"#,
+            "\n\n"
+        );
+        assert_eq!(
+            t(200, Value::String(anthropic.into())),
+            Tokens {
+                input: 2103,
+                output: 603,
+                cached: 2000,
+                cache_write: 100
+            }
+        );
+        // Chat Completions 末帧
+        let chat = r#"data: {"choices":[],"usage":{"completion_tokens":74,"prompt_tokens":236,"prompt_tokens_details":{"cached_tokens":128},"total_tokens":310}}"#;
+        assert_eq!(
+            t(200, Value::String(format!("{chat}\n\ndata: [DONE]\n\n"))),
+            Tokens {
+                input: 236,
+                output: 74,
+                cached: 128,
+                cache_write: 0
+            }
+        );
+        // Responses: usage 在 response.completed 里, 嵌套的 attribution 不参与
+        let responses = r#"data: {"type":"response.completed","response":{"error":null,"usage":{"attribution":{"items":{"m":{"input_tokens":999}}},"input_tokens":8,"input_tokens_details":{"cached_tokens":0},"output_tokens":5}}}"#;
+        let (tok, err) = digest(200, &Value::String(responses.into()));
+        assert_eq!(
+            tok,
+            Some(Tokens {
+                input: 8,
+                output: 5,
+                cached: 0,
+                cache_write: 0
+            })
+        );
+        assert_eq!(err, None, "error: null 不算错误");
+        // 非流式 JSON
+        let json = serde_json::json!({"usage":{"input_tokens":10,"output_tokens":2,"cache_read_input_tokens":0}});
+        assert_eq!(
+            t(200, json),
+            Tokens {
+                input: 10,
+                output: 2,
+                cached: 0,
+                cache_write: 0
+            }
+        );
+        // 没有 usage (客户端没要 include_usage / models 列表) -> 不出字段
+        assert_eq!(
+            digest(200, &Value::String("data: {\"choices\":[]}\n\n".into())).0,
+            None
+        );
+        assert_eq!(digest(200, &serde_json::json!({"data":[]})).0, None);
+    }
+
+    #[test]
+    fn digest_extracts_the_error_sentence() {
+        let e = |status, res: Value| digest(status, &res).1;
+        assert_eq!(
+            e(
+                429,
+                serde_json::json!({"error":{"message":"rate limited","type":"x"}})
+            )
+            .as_deref(),
+            Some("rate limited")
+        );
+        assert_eq!(
+            e(400, serde_json::json!({"detail":"bad model"})).as_deref(),
+            Some("bad model")
+        );
+        assert_eq!(
+            e(502, Value::String("upstream down".into())).as_deref(),
+            Some("upstream down")
+        );
+        // 流中途的 error 事件 (200 开头)
+        let sse = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n";
+        assert_eq!(
+            e(200, Value::String(sse.into())).as_deref(),
+            Some("Overloaded")
+        );
+        // 成功响应不带
+        assert_eq!(e(200, serde_json::json!({"id":"x"})), None);
+        assert_eq!(e(0, Value::Null), None);
+        // 超长截断, 按字符不按字节 (中文不被劈半)
+        let long = "错".repeat(ERROR_CAP + 50);
+        let got = e(500, serde_json::json!({"error":{"message": long}})).unwrap();
+        assert_eq!(got.chars().count(), ERROR_CAP + 1);
+        assert!(got.ends_with('…'));
     }
 
     #[test]

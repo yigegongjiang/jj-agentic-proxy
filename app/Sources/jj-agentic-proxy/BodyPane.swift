@@ -5,8 +5,10 @@ final class BodyPane: NSView {
     private let titleLabel = NSTextField(labelWithString: "")
     private let sizeLabel = NSTextField(labelWithString: "")
     private let copyButton = NSButton()
-    private let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 480, height: 320))
-    private let scroll = NSScrollView()
+    // 系统工厂给的 scroll + text view 已配好随宽换行; 手搭时 text view 的初始宽度会叠加到
+    // clip view 的宽度上 (autoresizing 按差值伸缩) -> 长行超出面板右缘被裁掉
+    private let scroll = NSTextView.scrollableTextView()
+    private var textView: NSTextView { scroll.documentView as! NSTextView }
 
     var text: String = "" {
         didSet {
@@ -34,6 +36,23 @@ final class BodyPane: NSView {
     }
 
     private var keepingScroll = false
+
+    /// 把最后一处 `marker` 顶到面板首行: 长对话的请求体, 要看的是最新那轮, 不是开头的 system。
+    /// 全文放得下时不动。
+    func scrollToLast(_ marker: String) {
+        let range = (text as NSString).range(of: marker, options: .backwards)
+        guard range.location != NSNotFound,
+              let layout = textView.layoutManager, let container = textView.textContainer
+        else { return }
+        layout.ensureLayout(for: container)
+        let glyphs = layout.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+        let y = layout.boundingRect(forGlyphRange: glyphs, in: container).minY
+            + textView.textContainerOrigin.y - 4
+        let clip = scroll.contentView
+        let maxY = max(0, textView.frame.height - clip.bounds.height)
+        clip.scroll(to: NSPoint(x: 0, y: min(max(0, y), maxY)))
+        scroll.reflectScrolledClipView(clip)
+    }
 
     var sizeText: String {
         get { sizeLabel.stringValue }
@@ -66,21 +85,15 @@ final class BodyPane: NSView {
         header.edgeInsets = NSEdgeInsets(top: 4, left: 10, bottom: 4, right: 8)
         header.translatesAutoresizingMaskIntoConstraints = false
 
+        let textView = self.textView
         textView.isEditable = false
         textView.isSelectable = true
         textView.isRichText = false
         textView.drawsBackground = false
         textView.font = .monospacedSystemFont(ofSize: 11.5, weight: .regular)
         textView.textContainerInset = NSSize(width: 10, height: 8)
-        textView.isVerticallyResizable = true
-        textView.isHorizontallyResizable = false
-        textView.autoresizingMask = [.width]
-        textView.minSize = .zero
-        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        textView.textContainer?.widthTracksTextView = true
         textView.isAutomaticQuoteSubstitutionEnabled = false
 
-        scroll.documentView = textView
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
         scroll.borderType = .noBorder
