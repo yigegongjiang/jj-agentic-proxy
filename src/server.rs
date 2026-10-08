@@ -257,9 +257,10 @@ pub(crate) async fn list(app: &Arc<App>, p: Provider) -> Vec<Value> {
 ///
 /// 上游清单里的 `minimal_client_version` 不可信 (实测 gpt-6.1-sol 标 0.153.0, 实际 0.159.0 起才列出),
 /// 按真实发版号报才与「已升到最新的官方 CLI」一致。未登录 Codex / 网络不通时静默跳过。
-pub(crate) async fn learn_codex_latest(app: &Arc<App>) {
+/// 返回是否拿到了有效版本号 (与版本是否变化无关) -> 调用方据此决定多久后再取。
+pub(crate) async fn learn_codex_latest(app: &Arc<App>) -> bool {
     if app.auth.snapshot(Provider::Codex).await.is_none() {
-        return;
+        return false;
     }
     let sent = app
         .http
@@ -275,21 +276,27 @@ pub(crate) async fn learn_codex_latest(app: &Arc<App>) {
         Ok(r) if r.status().is_success() => r,
         Ok(r) => {
             tracing::warn!(status = r.status().as_u16(), "Codex 最新版本号获取失败");
-            return;
+            return false;
         }
         Err(e) => {
             tracing::warn!(error = %e, "Codex 最新版本号获取失败");
-            return;
+            return false;
         }
     };
     let Ok(v) = resp.json::<Value>().await else {
-        return;
+        return false;
     };
-    if let Some(tag) = v.get("tag_name").and_then(Value::as_str) {
-        let version = tag.trim_start_matches("rust-v");
-        if provider::learn_codex_latest(version) {
+    let Some(tag) = v.get("tag_name").and_then(Value::as_str) else {
+        return false;
+    };
+    let version = tag.trim_start_matches("rust-v");
+    match provider::learn_codex_latest(version) {
+        Some(true) => {
             tracing::info!(version, "Codex 版本下限已更新");
+            true
         }
+        Some(false) => true,
+        None => false,
     }
 }
 

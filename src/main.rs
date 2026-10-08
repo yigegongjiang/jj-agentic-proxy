@@ -146,9 +146,14 @@ async fn serve() -> Result<()> {
     // 上游随新模型抬高最低客户端版本 -> 启动即取一次最新发版号, 之后每小时一次 (本机没装 codex 时唯一的跟进途径)
     let probe_app = app.clone();
     tokio::spawn(async move {
+        let mut retry = None;
         loop {
-            server::learn_codex_latest(&probe_app).await;
-            tokio::time::sleep(Duration::from_secs(3600)).await;
+            retry = if server::learn_codex_latest(&probe_app).await {
+                None
+            } else {
+                Some(next_probe_retry(retry))
+            };
+            tokio::time::sleep(retry.unwrap_or(PROBE_INTERVAL)).await;
         }
     });
 
@@ -158,6 +163,17 @@ async fn serve() -> Result<()> {
             .with_context(|| format!("{label} 端口服务异常退出"))?;
     }
     Ok(())
+}
+
+/// 成功后每小时取一次最新发版号。
+const PROBE_INTERVAL: Duration = Duration::from_secs(3600);
+/// 失败重试的起点: 翻倍退避, 封顶 `PROBE_INTERVAL`。
+const PROBE_RETRY_MIN: Duration = Duration::from_secs(30);
+
+/// 实测坑: 开机自启时网络还没就绪, 启动那次取失败后要等满一小时 -> 期间按本机缓存里的旧版本号请求上游。
+/// 失败改为 30s 起翻倍重试; 不固定短间隔: GitHub 未鉴权限额 60 次/小时/IP, 被限流时短间隔只会一直撞墙。
+fn next_probe_retry(prev: Option<Duration>) -> Duration {
+    prev.map_or(PROBE_RETRY_MIN, |d| (d * 2).min(PROBE_INTERVAL))
 }
 
 /// 查看器不是协议面 -> 没有 `Surface` 可借, 单独一个标签。
@@ -503,6 +519,18 @@ mod tests {
             .await
             .unwrap();
         assert!(super::bind(19012).await.is_err());
+    }
+
+    #[test]
+    fn probe_retry_doubles_from_30s_and_caps_at_interval() {
+        let mut retry = None;
+        let mut seen = Vec::new();
+        for _ in 0..9 {
+            let d = super::next_probe_retry(retry);
+            seen.push(d.as_secs());
+            retry = Some(d);
+        }
+        assert_eq!(seen, [30, 60, 120, 240, 480, 960, 1920, 3600, 3600]);
     }
 
     #[test]

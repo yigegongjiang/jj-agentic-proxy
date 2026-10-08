@@ -223,16 +223,18 @@ static LEARNED_CODEX_FLOOR: Mutex<Option<String>> = Mutex::new(None);
 pub const CODEX_LATEST_RELEASE_URL: &str =
     "https://api.github.com/repos/openai/codex/releases/latest";
 
-/// 记下最新发版号并让缓存立即失效; 形状不对 (非 `X.Y.Z`) 不采纳。返回是否采纳。
-pub fn learn_codex_latest(version: &str) -> bool {
-    if semver_key(version).is_none() {
-        return false;
-    }
-    *LEARNED_CODEX_FLOOR
+/// 记下最新发版号, 有变化才让缓存失效; 形状不对 (非 `X.Y.Z`) 不采纳 -> `None`, 否则 `Some(是否变化)`。
+pub fn learn_codex_latest(version: &str) -> Option<bool> {
+    semver_key(version)?;
+    let mut slot = LEARNED_CODEX_FLOOR
         .lock()
-        .unwrap_or_else(|e| e.into_inner()) = Some(version.to_string());
+        .unwrap_or_else(|e| e.into_inner());
+    if slot.as_deref() == Some(version) {
+        return Some(false);
+    }
+    *slot = Some(version.to_string());
     CODEX_VERSION.clear();
-    true
+    Some(true)
 }
 
 fn codex_home() -> Option<PathBuf> {

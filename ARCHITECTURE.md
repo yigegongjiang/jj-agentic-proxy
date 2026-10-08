@@ -146,6 +146,8 @@ curl http://127.0.0.1:10010/backend-api/codex/usage  # 订阅额度: plan_type +
 - 上游按 Codex CLI 版本 gate 新模型: 版本号 = max(内置下限, `~/.codex/models_cache.json` `client_version` (已装版本), `version.json` `latest_version`, GitHub `openai/codex` 最新正式版), 每 10 分钟重读
   - 实测坑: 启动时读一次即冻结, daemon 长跑后被上游按旧版本拒新模型; 按 0.146.0 请求时 gpt-6 系列整批不列
   - 最新正式版 = 官方 CLI 升级检查同源 (`releases/latest`, tag `rust-vX.Y.Z`), daemon 启动取一次后每小时一次, 5s 超时, 未登录 Codex 不取 -> 本机没装 codex 也不掉队
+  - 取失败 -> 30s 起翻倍重试, 封顶 1h; 实测坑 (10-08): 开机自启时网络未就绪, 启动那次失败后干等 1h, 期间按 0.160.1 请求 (最新已是 0.161.0). 不用固定短间隔: GitHub 未鉴权限额 60 次/小时/IP, 被限流时只会一直撞
+  - 本机缓存会落后于已装 CLI (实测 `codex --version` 0.161.0 时 `models_cache.json` 仍 0.160.0, `version.json` 0.160.1) -> 发版号是唯一及时的来源
   - 不用上游清单的 `minimal_client_version`: 实测不可信 (gpt-6.1-sol 标 0.153.0, 实际 0.159.0 起才列出)
 - Claude UA `claude-cli/<ver>` 同理跟随 `~/.local/share/claude/versions/` 最新目录名 (原生安装器), 找不到回落下限 2.1.88; 上游目前不校验该版本 (实测 2.1.88 与 2.1.285 均 200 + `representative-claim: five_hour`)
 - 零配置: 无任何自定义 env / 参数 (端口、路径、身份全部内置); 只认标准 `RUST_LOG` 调日志
