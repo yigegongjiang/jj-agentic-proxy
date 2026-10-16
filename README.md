@@ -49,7 +49,6 @@
 - 认 OpenAI 接口、想走 Claude-Code 订阅通道，走 `anthropic-openai`
 - 认 Anthropic 接口、想走 Claude-Code 订阅通道，走 `anthropic`
 - 对于 `openai-codex` 通道，外部平台会自行拼接 url path，可按需填入 `xxx:10010、xxx:10010/backend-api、xxx:10010/backend-api/codex` 进行验证哪一个可用。
-- 从手机或另一台电脑接入：把 `127.0.0.1` 换成 **Console… → Status** 中「局域网同端口」给出的 IP，端口不变
 
 ## 四、查看请求往返
 
@@ -62,8 +61,6 @@
   - **核心内容** / **原始报文**：只看对话正文，或看完整报文
 - 流式响应已重新组装为完整对话，不再是分片
 
-其他设备用浏览器打开 `http://<局域网 IP>:10020`，可看到同样的内容。
-
 记录按天存放于 `~/.config/jj-agentic-proxy/log/`，不会自动清理。
 
 ## 五、终端命令
@@ -73,7 +70,7 @@ app 上的按钮与下列子命令一一对应：
 ```bash
 jj-agentic-proxy                # 启动（已在运行则重启）
 jj-agentic-proxy stop           # 停止
-jj-agentic-proxy status         # 运行状态、账号、套餐、局域网地址、固定 api key
+jj-agentic-proxy status         # 运行状态、账号、套餐、固定 api key
 jj-agentic-proxy models         # 当前可用的 model
 jj-agentic-proxy logs -n 20     # 最近 20 条往返摘要
 jj-agentic-proxy login codex    # 或 login anthropic
@@ -84,8 +81,7 @@ jj-agentic-proxy logout all     # 或 logout codex / logout anthropic
 
 ## 注意事项
 
-- **这几个端口不做鉴权**。同一网络内的任何人连上后即可消耗你的订阅额度并翻阅全部记录。仅建议在家庭或公司内网使用，**不要在路由器上把端口映射到公网**
-- 首次启动时 macOS 可能询问「是否允许接受传入网络连接」，需选择允许。选择拒绝的表现是：本机访问正常，局域网内其他设备无法连接
+- **所有端口只监听 `127.0.0.1`**，其他设备无法连接。端口不做鉴权，本机任何进程都能使用订阅额度并读取全部记录
 - 少数客户端（如 pi-ai）会把 api key 当作 JWT 解析，这类客户端需改填 **Console… → Status** 中给出的那份固定 key
 
 端点字段、记录格式与整体架构见 [ARCHITECTURE.md](./ARCHITECTURE.md)。

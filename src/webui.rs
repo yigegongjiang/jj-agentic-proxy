@@ -85,7 +85,6 @@ struct StatusOut {
     pid: u32,
     endpoints: Vec<EndpointOut>,
     ui_port: u16,
-    lan_ip: Option<String>,
     daemon_log: String,
     record_dir: String,
     auth_path: String,
@@ -163,7 +162,6 @@ async fn status() -> Response {
             })
             .collect(),
         ui_port: provider::UI_PORT,
-        lan_ip: crate::lan_ip().map(|ip| ip.to_string()),
         daemon_log: daemon::log_path().display().to_string(),
         record_dir: reqlog::log_dir().display().to_string(),
         auth_path: store::auth_path().display().to_string(),

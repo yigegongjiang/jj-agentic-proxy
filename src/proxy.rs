@@ -403,7 +403,7 @@ fn not_found_hint(surface: Surface, path: &str) -> String {
         .into_iter()
         .find(|&s| s != surface && resolve(s, path, None).is_some());
     match other {
-        // 只给端口不给 host: 客户端可能从局域网另一台机器打进来, 写死 127.0.0.1 会误导。
+        // 只给端口不给 host: 客户端填的可能是 localhost 而非 127.0.0.1, 端口才是要改的部分。
         Some(s) => format!("路径 {path} 属于 {s}, 请改用端口 {}", s.port()),
         None => format!(
             "未支持的路径 {path}; {surface} 端口 ({}) 可用: {}",

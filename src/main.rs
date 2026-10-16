@@ -112,34 +112,30 @@ async fn serve() -> Result<()> {
     let ui_bound = bind(provider::UI_PORT).await?;
 
     let mut tasks: Vec<(&'static str, tokio::task::JoinHandle<_>)> = Vec::new();
-    for (s, listeners) in bound {
-        for listener in listeners {
-            log_listen(s.key(), &listener);
-            let port = proxy::Port {
-                app: app.clone(),
-                surface: s,
-            };
-            tasks.push((
-                s.key(),
-                tokio::spawn(
-                    axum::serve(listener, server::router(port))
-                        .with_graceful_shutdown(shutdown())
-                        .into_future(),
-                ),
-            ));
-        }
-    }
-    for listener in ui_bound {
-        log_listen(UI_LABEL, &listener);
+    for (s, listener) in bound {
+        log_listen(s.key(), &listener);
+        let port = proxy::Port {
+            app: app.clone(),
+            surface: s,
+        };
         tasks.push((
-            UI_LABEL,
+            s.key(),
             tokio::spawn(
-                axum::serve(listener, webui::router(app.clone()))
+                axum::serve(listener, server::router(port))
                     .with_graceful_shutdown(shutdown())
                     .into_future(),
             ),
         ));
     }
+    log_listen(UI_LABEL, &ui_bound);
+    tasks.push((
+        UI_LABEL,
+        tokio::spawn(
+            axum::serve(ui_bound, webui::router(app.clone()))
+                .with_graceful_shutdown(shutdown())
+                .into_future(),
+        ),
+    ));
 
     daemon::mark_ready(&mut instance)?;
 
@@ -204,45 +200,25 @@ fn init_tracing() -> Result<()> {
     Ok(())
 }
 
-/// loopback 面绑不上 = 端口被占, 直接失败; 通配面 (局域网入口) 尽力而为。
-async fn bind(port: u16) -> Result<Vec<tokio::net::TcpListener>> {
-    let loopback = tokio::net::TcpListener::bind((provider::BIND_LOOPBACK, port))
+/// 只绑 loopback: 绑不上 = 端口被占, 直接失败。
+async fn bind(port: u16) -> Result<tokio::net::TcpListener> {
+    tokio::net::TcpListener::bind((provider::BIND_LOOPBACK, port))
         .await
         .with_context(|| {
             format!(
                 "监听 {}:{port} 失败 (端口固定, 需先释放占用)",
                 provider::BIND_LOOPBACK
             )
-        })?;
-    let mut listeners = vec![loopback];
-    for host in provider::BIND_WILDCARDS {
-        match tokio::net::TcpListener::bind((host, port)).await {
-            Ok(l) => listeners.push(l),
-            // dual-stack 下 `0.0.0.0` 必然与 `::` 重复 -> 失败是预期, 不是故障。
-            Err(e) => tracing::debug!("{host}:{port} 未绑定: {e}"),
-        }
-    }
-    if listeners.len() == 1 {
-        tracing::warn!("{port} 只绑到 loopback, 局域网主机连不上");
-    }
-    Ok(listeners)
+        })
 }
 
-/// 本机在局域网里的地址: UDP connect 只查路由不发包, 无网络往返也能拿到出口网卡 IP。
-pub(crate) fn lan_ip() -> Option<std::net::IpAddr> {
-    let sock = std::net::UdpSocket::bind(("0.0.0.0", 0)).ok()?;
-    sock.connect(("8.8.8.8", 80)).ok()?;
-    let ip = sock.local_addr().ok()?.ip();
-    (!ip.is_loopback() && !ip.is_unspecified()).then_some(ip)
-}
-
-/// 三个协议面 + 查看器的 base url, 附局域网入口 (start / status 共用)。
+/// 三个协议面 + 查看器的 base url (start / status 共用)。
 pub(crate) fn print_endpoints() {
     // 用 key() 而非 Display: 宽度说明符对自定义 Display 不生效, 会排不齐。
     for s in Surface::ALL {
         println!("- {:<13} http://{}:{}", s.key(), provider::HOST, s.port());
         // 逃生口只在 codex 面存在, 且不出现在任何客户端配置里 -> 不在这里提就没人知道。
-        // 中文宽度说明符会排不齐 -> 与「局域网同端口」一样走两空格缩进, 不对列。
+        // 中文宽度说明符会排不齐 -> 走两空格缩进, 不对列。
         if s == Surface::Codex {
             println!(
                 "  透传口: http://{}:{}/backend-api/codex/* (打上游私有端点, 如 /usage 查额度)",
@@ -256,9 +232,6 @@ pub(crate) fn print_endpoints() {
         provider::HOST,
         provider::UI_PORT
     );
-    if let Some(ip) = lan_ip() {
-        println!("  局域网同端口: http://{ip} (无鉴权, 仅限可信内网)");
-    }
     // 代理不校验 key, 但 codex 面的部分客户端会本地解析它 -> 给一份能直接复制的。
     println!("- {:<13} {}", "api key", provider::CLIENT_API_KEY);
 }
@@ -500,17 +473,11 @@ mod tests {
         assert_ne!(super::natural_cmp(&huge, "m-1"), std::cmp::Ordering::Less);
     }
 
-    /// 局域网入口是需求本身: 只剩 loopback 就等于其他主机连不上。
+    /// 端口无鉴权: 绑到通配地址 = 局域网任何人都能用本机订阅 + 翻阅往返记录。
     #[tokio::test]
-    async fn bind_covers_loopback_and_wildcard() {
-        let addrs: Vec<_> = super::bind(19011)
-            .await
-            .unwrap()
-            .iter()
-            .map(|l| l.local_addr().unwrap().ip())
-            .collect();
-        assert!(addrs.iter().any(|ip| ip.is_loopback()), "{addrs:?}");
-        assert!(addrs.iter().any(|ip| ip.is_unspecified()), "{addrs:?}");
+    async fn bind_is_loopback_only() {
+        let ip = super::bind(19011).await.unwrap().local_addr().unwrap().ip();
+        assert_eq!(ip, std::net::Ipv4Addr::LOCALHOST);
     }
 
     #[tokio::test]

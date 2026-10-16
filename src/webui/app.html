@@ -1465,7 +1465,6 @@ async function runCommand(cmd) {
       const lines = [`运行中 (pid ${s.pid})`];
       for (const e of s.endpoints) lines.push(`- ${e.surface.padEnd(13)} http://127.0.0.1:${e.port}`);
       lines.push(`- ${'web-ui'.padEnd(13)} http://127.0.0.1:${s.ui_port}`);
-      if (s.lan_ip) lines.push(`  局域网同端口: http://${s.lan_ip} (无鉴权, 仅限可信内网)`);
       lines.push(`日志: ${s.daemon_log}`);
       lines.push(`往返记录: ${s.record_dir} (按天分文件, 不自动清理)`);
       lines.push(`store: ${s.auth_path}`);
@@ -1610,7 +1609,7 @@ for (const b of document.querySelectorAll('[data-copy]')) {
     if (!text) return;
     const done = () => { b.textContent = 'Copied'; setTimeout(() => { b.textContent = 'Copy'; }, 1200); };
     try {
-      // clipboard API 只在 secure context 可用: 127.0.0.1 / localhost 算, 局域网 IP 不算
+      // clipboard API 只在 secure context 可用; 失败时退回 execCommand
       await navigator.clipboard.writeText(text);
       done();
     } catch {

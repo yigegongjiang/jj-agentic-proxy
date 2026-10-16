@@ -8,18 +8,11 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-/// loopback 面: 必须绑到, 绑不上即判定端口被占。
+/// 唯一监听地址: 端口无鉴权 -> 只给本机进程用, 不对局域网开放 (2026-10 安全审计要求)。
 pub const BIND_LOOPBACK: &str = "127.0.0.1";
 
-/// 通配面: 让同局域网的其他主机能用本机 LAN IP 连 (best-effort)。
-///
-/// `::` 在先 — macOS 默认 dual-stack, 一个 socket 就覆盖 v4 与 v6;
-/// dual-stack 被关掉时才轮到 `0.0.0.0` 补上 v4。BSD 按最具体地址派发,
-/// 通配面与上面的 loopback socket 并存不冲突。
-pub const BIND_WILDCARDS: [&str; 2] = ["::", "0.0.0.0"];
-
-/// 打印 base url 用的本机地址 (局域网客户端换成本机 LAN IP)。
-pub const HOST: &str = "127.0.0.1";
+/// 打印 base url 用的本机地址。
+pub const HOST: &str = BIND_LOOPBACK;
 
 /// 客户端填的 api key。代理不校验它, 但 codex 协议面的部分客户端 (pi-ai 等) 会在发请求
 /// 前把它当 JWT 本地解析, 取 `https://api.openai.com/auth` 下的 `chatgpt_account_id`
