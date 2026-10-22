@@ -168,7 +168,7 @@ scripts/install-local.sh       本机预部署总入口 = 本机架构构建 + �
 scripts/make-dist.sh           分发打包: arm64 / x86_64 各构建一套 -> dist/ 下 dmg + SHA256SUMS + release notes
 .github/workflows/release.yml  打 tag 即发版: 验证 + 跑 make-dist.sh + 产物传 GitHub Release (CI 是脚本的薄壳, 本机可复现)
 
-app/                           macOS 查看器 app: SwiftPM + AppKit (macOS 13+, 零第三方依赖); package.sh 组装 bundle, Resources/ 存 Info.plist.in (`@VERSION@` 占位)
+app/                           macOS 查看器 app: SwiftPM + AppKit (macOS 13+, 零第三方依赖); package.sh 组装 bundle, Resources/ 存 Info.plist.in (`@VERSION@` 占位) + AppIcon.icon (Icon Composer 分层 SVG, package.sh 经 actool 编译)
 app/Sources/jj-agentic-proxy/
   MainViewController.swift + BodyPane.swift            列表 / 过滤 / follow / 详情绑定 + 单 body 面板 (等宽只读 + Copy)
   CoreContent.swift                                    核心内容视图: SSE 重建 + 三方言归一 + 纯文本排版

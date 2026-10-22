@@ -61,7 +61,12 @@ rm -rf "$BUNDLE"
 mkdir -p "$BUNDLE/Contents/MacOS" "$BUNDLE/Contents/Resources"
 cp "$APP_BIN" "$BUNDLE/Contents/MacOS/$APP_NAME"
 cp "$CLI_BIN" "$BUNDLE/Contents/MacOS/$CLI_NAME"
-cp "$ROOT/Resources/AppIcon.icns" "$BUNDLE/Contents/Resources/AppIcon.icns"
+# Icon Composer 分层图标 -> Assets.car (系统渲染玻璃 / 深色外观) + AppIcon.icns (旧系统兜底)
+# actool 路径 MUST 绝对: 共享 daemon 按陈旧 cwd 解析相对路径 (实测编进别的工程图标 / 输出目录不存在)
+xcrun actool "$ROOT/Resources/AppIcon.icon" --compile "$BUNDLE/Contents/Resources" \
+  --platform macosx --minimum-deployment-target 13.0 --app-icon AppIcon \
+  --output-partial-info-plist "$ROOT/build/AppIcon-partial.plist" > /dev/null
+[ -f "$BUNDLE/Contents/Resources/Assets.car" ] || { echo "actool 未产出 Assets.car" >&2; exit 1; }
 sed "s/@VERSION@/$VERSION/g" "$ROOT/Resources/Info.plist.in" > "$BUNDLE/Contents/Info.plist"
 printf 'APPL????' > "$BUNDLE/Contents/PkgInfo"
 
