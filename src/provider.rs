@@ -18,7 +18,7 @@ pub const HOST: &str = BIND_LOOPBACK;
 /// 前把它当 JWT 本地解析, 取 `https://api.openai.com/auth` 下的 `chatgpt_account_id`
 /// 当 `chatgpt-account-id` 头 -> 随便一个非空串会让这些客户端连请求都发不出去。
 ///
-/// 这里给一份固定的合法 JWT 形态值, 三个协议面通用。上游身份一律用本机 OAuth 凭证,
+/// 这里给一份固定的合法 JWT 形态值, 所有协议通用。上游身份一律用本机 OAuth 凭证,
 /// 客户端送来的 authorization 与 chatgpt-account-id 都会被 `codex_headers` 覆盖 ->
 /// 这个值只满足客户端本地解析, 不参与任何鉴权。
 ///
@@ -26,6 +26,9 @@ pub const HOST: &str = BIND_LOOPBACK;
 /// - payload 明文: `{"https://api.openai.com/auth":{"chatgpt_account_id":"jj-agentic-traffic"}}`
 /// - 三段 base64 都落在标准与 url-safe 字母表的交集 (无 `+` `/` `-` `_`) -> 两种解码器都能读
 pub const CLIENT_API_KEY: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiamotYWdlbnRpYy10cmFmZmljIn19.jjagentictraffic";
+
+/// 代理唯一端口: 全部协议 + 两家订阅都在这里, 按 path + model 分流。固定不可配置 -> 客户端 base url 永远可写死。
+pub const PORT: u16 = 10010;
 
 /// Web 查看器端口。刻意不进 `Surface`: 它不是协议面, 没有上游与凭证映射,
 /// 混进去会让透传 / 模型列表 / 错误信封到处长出「这个面不是代理」的分支。
@@ -63,43 +66,28 @@ impl fmt::Display for Provider {
     }
 }
 
-/// 一个端口 = 一个协议面。凭证按 provider 复用: 10011 / 10012 共用同一份 Anthropic 凭证。
-///
-/// 端口固定不可配置 -> 客户端 base url 永远可写死。
+/// 一次请求分流后的协议面 (`passthrough::surface_for`); 往返记录的 `surface` 字段取它的 key。
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Surface {
-    /// 10010: Codex 原生 (OpenAI Responses)
+    /// Codex 原生 (OpenAI Responses)
     Codex,
-    /// 10011: Anthropic 原生 (Messages)
+    /// Anthropic 原生 (Messages)
     ClaudeCode,
-    /// 10012: Anthropic 官方 OpenAI 兼容层直通
-    ClaudeOpenAI,
 }
 
 impl Surface {
-    pub const ALL: [Surface; 3] = [Surface::Codex, Surface::ClaudeCode, Surface::ClaudeOpenAI];
-
     pub const fn key(self) -> &'static str {
         match self {
             Surface::Codex => "codex",
             Surface::ClaudeCode => "claude-code",
-            Surface::ClaudeOpenAI => "claude-openai",
         }
     }
 
-    pub const fn port(self) -> u16 {
-        match self {
-            Surface::Codex => 10010,
-            Surface::ClaudeCode => 10011,
-            Surface::ClaudeOpenAI => 10012,
-        }
-    }
-
-    /// 该端口用哪份凭证 / 走哪家上游。
+    /// 该协议面用哪份凭证 / 走哪家上游。
     pub const fn provider(self) -> Provider {
         match self {
             Surface::Codex => Provider::Codex,
-            Surface::ClaudeCode | Surface::ClaudeOpenAI => Provider::Anthropic,
+            Surface::ClaudeCode => Provider::Anthropic,
         }
     }
 }
@@ -124,8 +112,6 @@ pub const ANTHROPIC_OAUTH_BETA: &str = "oauth-2025-04-20";
 /// OAuth 凭证只被授权用于 Claude Code, system 第一块必须带此前缀, 否则上游 403。
 pub const CLAUDE_CODE_SYSTEM_PREFIX: &str =
     "You are Claude Code, Anthropic's official CLI for Claude.";
-/// Anthropic 官方 OpenAI 兼容层 (同域, 由上游自己做协议转换)。
-pub const ANTHROPIC_OPENAI_PATH: &str = "/v1/chat/completions";
 
 pub fn anthropic_redirect_uri() -> String {
     format!("http://localhost:{ANTHROPIC_CALLBACK_PORT}{ANTHROPIC_CALLBACK_PATH}")

@@ -1,4 +1,4 @@
-//! 端口层: 每个端口都接全部协议, 按 path + model 分流到 provider; 业务按官方 api key 方式调用 -> 本机换成 CLI (OAuth) 渠道。
+//! 端口层: 一个端口接全部协议, 按 path + model 分流到 provider; 业务按官方 api key 方式调用 -> 本机换成 CLI (OAuth) 渠道。
 //!
 //! 客户端全程以为自己在直连官方付费 api, 因此:
 //! - 两家 base url 约定 (域名根 / `.../v1`) 都要通 -> 路径先归一
@@ -20,16 +20,16 @@ use serde_json::{json, Value};
 
 use crate::convert;
 use crate::passthrough::{self, json_body, App, Dialect, Port};
-use crate::provider::{self, Provider, Surface};
+use crate::provider::{self, Provider};
 use crate::reqlog;
 use crate::store::now;
 
-pub fn router(port: Port) -> Router {
+pub fn router(app: Arc<App>) -> Router {
     Router::new()
         .fallback(any(dispatch))
         .layer(DefaultBodyLimit::disable())
         .layer(passthrough::cors())
-        .with_state(port)
+        .with_state(app)
 }
 
 fn is_websocket_upgrade(h: &HeaderMap) -> bool {
@@ -44,9 +44,9 @@ struct ModelField {
     model: Option<String>,
 }
 
-/// 唯一入口 -> 往返记录只需挂在这里, 所有端口 / 路径 / 错误一并覆盖。
+/// 唯一入口 -> 往返记录只需挂在这里, 所有路径 / 错误一并覆盖。
 async fn dispatch(
-    State(arrival): State<Port>,
+    State(app): State<Arc<App>>,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
@@ -55,12 +55,8 @@ async fn dispatch(
     let model = (passthrough::strip_v1(uri.path()) == "/chat/completions")
         .then(|| serde_json::from_slice::<ModelField>(&body).ok()?.model)
         .flatten();
-    let surface = passthrough::surface_for(arrival.surface, uri.path(), &headers, model.as_deref());
-    // 记录里的 surface = 实际协议面 -> 查看器按它过滤, 与从哪个端口进来无关
-    let state = State(Port {
-        app: arrival.app,
-        surface,
-    });
+    let surface = passthrough::surface_for(uri.path(), &headers, model.as_deref());
+    let state = State(Port { app, surface });
     let path = uri.path_and_query().map_or(uri.path(), |p| p.as_str());
     let rec = reqlog::start(surface, &method, path, &headers, &body);
     // scoped: 处理过程中打上游时顺带把那一腿 (注入后的 header / 改写后的 body) 记下来
@@ -84,10 +80,8 @@ async fn route(
     let surface = state.surface;
     let dialect = Dialect::of(surface, &headers);
     let path = passthrough::strip_v1(uri.path());
-    // Anthropic 方言在 claude-code 端口落回透传 -> 拿到官方原样形状; 其余端口只讲 OpenAI。
+    // Anthropic 方言落回透传 -> 拿到官方原样形状; 其余只讲 OpenAI。
     let openai_list = method == Method::GET && dialect == Dialect::OpenAI;
-    // claude-openai 端口的 chat/completions 由 Anthropic 官方兼容层出结果 -> 落透传。
-    let local_chat = method == Method::POST && surface != Surface::ClaudeOpenAI;
 
     // 只提供 HTTP。官方 Codex CLI 仅在握手拿到 426 时立即改走 HTTP (`codex-rs/core/src/client.rs`
     // 的 UPGRADE_REQUIRED 分支), 其余状态码先按普通失败重试; 落透传还会被上游回成 405。
@@ -101,7 +95,7 @@ async fn route(
 
     match path {
         "/health" => passthrough::health(state).await,
-        "/chat/completions" if local_chat => chat_completions(state, body).await,
+        "/chat/completions" if method == Method::POST => chat_completions(state, body).await,
         "/models" if openai_list => openai_models(state).await,
         p if openai_list && p.starts_with("/models/") => {
             openai_model(state, &p["/models/".len()..]).await
@@ -188,29 +182,23 @@ async fn chat_completions(State(port): State<Port>, body: Bytes) -> Response {
 
 // ---------- 模型列表 (OpenAI 方言) ----------
 
-/// 两家订阅合并成一张表 (任一端口选到任一 model 都能用); 未登录的那家为空。
-/// 到达端口所属那家排前面: 客户端常取首项当默认 model, 老配置的默认不变。
+/// 两家订阅合并成一张表 (选到任一 model 都能用); 未登录的那家为空。
 async fn openai_models(State(port): State<Port>) -> Response {
-    let home = port.provider();
-    let other = Provider::ALL
-        .into_iter()
-        .find(|&p| p != home)
-        .unwrap_or(home);
-    let (mut data, rest) = tokio::join!(list(&port.app, home), extra_list(&port.app, other));
+    let [first, second] = Provider::ALL;
+    let (mut data, rest) = tokio::join!(listed(&port.app, first), listed(&port.app, second));
     data.extend(rest);
     json_body(StatusCode::OK, json!({ "object": "list", "data": data }))
 }
 
-/// 另一家的列表尽力而为: 未登录不发请求, 上游卡住最多等 5s ->
-/// 一家故障 (重试 + 300s 读超时) 不拖住只用另一家的老客户端。
-async fn extra_list(app: &Arc<App>, p: Provider) -> Vec<Value> {
+/// 未登录不发请求, 上游卡住最多等 5s -> 一家故障 (重试 + 300s 读超时) 不拖住另一家的列表。
+async fn listed(app: &Arc<App>, p: Provider) -> Vec<Value> {
     if app.auth.snapshot(p).await.is_none() {
         return Vec::new();
     }
     tokio::time::timeout(std::time::Duration::from_secs(5), list(app, p))
         .await
         .unwrap_or_else(|_| {
-            tracing::warn!(provider = %p, "模型列表超时, 本次只列到达端口那家");
+            tracing::warn!(provider = %p, "模型列表超时, 本次跳过");
             Vec::new()
         })
 }

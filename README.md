@@ -40,7 +40,6 @@
 - 接口类型不限：OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 均由该地址提供
 - base url 结尾的 `/v1` 加与不加均可
 - 客户端只接受 Codex 订阅地址时，填 `http://127.0.0.1:10010/backend-api/codex`。部分平台会自行拼接 url path，可依次尝试 `xxx:10010`、`xxx:10010/backend-api`、`xxx:10010/backend-api/codex`
-- 旧版本使用的 `10011`、`10012` 端口继续可用，已有配置无需修改
 
 ## 四、查看请求往返
 

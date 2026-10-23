@@ -23,7 +23,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::passthrough::App;
-use crate::provider::{self, Provider, Surface};
+use crate::provider::{self, Provider};
 use crate::store::{self, now};
 use crate::{daemon, oauth, reqlog, server};
 
@@ -83,18 +83,12 @@ async fn page() -> Html<&'static str> {
 #[derive(Serialize)]
 struct StatusOut {
     pid: u32,
-    endpoints: Vec<EndpointOut>,
+    port: u16,
     ui_port: u16,
     daemon_log: String,
     record_dir: String,
     auth_path: String,
     creds: Vec<CredOut>,
-}
-
-#[derive(Serialize)]
-struct EndpointOut {
-    surface: String,
-    port: u16,
 }
 
 #[derive(Serialize)]
@@ -143,13 +137,7 @@ async fn status() -> Response {
         .collect();
     Json(StatusOut {
         pid: std::process::id(),
-        endpoints: Surface::ALL
-            .iter()
-            .map(|s| EndpointOut {
-                surface: s.key().to_string(),
-                port: s.port(),
-            })
-            .collect(),
+        port: provider::PORT,
         ui_port: provider::UI_PORT,
         daemon_log: daemon::log_path().display().to_string(),
         record_dir: reqlog::log_dir().display().to_string(),

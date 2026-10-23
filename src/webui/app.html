@@ -1463,11 +1463,9 @@ async function runCommand(cmd) {
     try {
       const s = await api('/api/status');
       const lines = [`运行中 (pid ${s.pid})`];
-      // 与 CLI `print_endpoints` 同形: 首个端口 = base url, 其余只为旧配置保留
-      const [base, ...legacy] = s.endpoints;
-      lines.push(`- ${'base url'.padEnd(13)} http://127.0.0.1:${base.port} (OpenAI / Anthropic / Codex 协议都接, 按 model 分流)`);
-      lines.push(`  透传口: http://127.0.0.1:${base.port}/backend-api/codex/* (打上游私有端点, 如 /usage 查额度)`);
-      lines.push(`  旧端口 ${legacy.map(e => e.port).join(' / ')} 继续可用, 已有配置不用改`);
+      // 与 CLI `print_endpoints` 同形
+      lines.push(`- ${'base url'.padEnd(13)} http://127.0.0.1:${s.port} (OpenAI / Anthropic / Codex 协议都接, 按 model 分流)`);
+      lines.push(`  透传口: http://127.0.0.1:${s.port}/backend-api/codex/* (打上游私有端点, 如 /usage 查额度)`);
       lines.push(`- ${'web-ui'.padEnd(13)} http://127.0.0.1:${s.ui_port}`);
       lines.push(`日志: ${s.daemon_log}`);
       lines.push(`往返记录: ${s.record_dir} (按天分文件, 不自动清理)`);

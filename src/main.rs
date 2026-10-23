@@ -22,7 +22,7 @@ use rand::RngCore as _;
 use tracing_subscriber::EnvFilter;
 
 use crate::auth::AuthManager;
-use crate::provider::{Provider, Surface};
+use crate::provider::Provider;
 use crate::store::now;
 
 #[derive(Parser)]
@@ -114,28 +114,19 @@ async fn serve() -> Result<()> {
 
     // 先全部 bind 再 serve: 端口被占用要立刻失败, 不留半个可用端口的中间态。
     // 查看器端口与协议面同等对待 -> 不会出现「代理在跑但看不见流量」的半残状态。
-    let mut bound = Vec::new();
-    for s in Surface::ALL {
-        bound.push((s, bind(s.port()).await?));
-    }
+    let api_bound = bind(provider::PORT).await?;
     let ui_bound = bind(provider::UI_PORT).await?;
 
     let mut tasks: Vec<(&'static str, tokio::task::JoinHandle<_>)> = Vec::new();
-    for (s, listener) in bound {
-        log_listen(s.key(), &listener);
-        let port = passthrough::Port {
-            app: app.clone(),
-            surface: s,
-        };
-        tasks.push((
-            s.key(),
-            tokio::spawn(
-                axum::serve(listener, server::router(port))
-                    .with_graceful_shutdown(shutdown())
-                    .into_future(),
-            ),
-        ));
-    }
+    log_listen(API_LABEL, &api_bound);
+    tasks.push((
+        API_LABEL,
+        tokio::spawn(
+            axum::serve(api_bound, server::router(app.clone()))
+                .with_graceful_shutdown(shutdown())
+                .into_future(),
+        ),
+    ));
     log_listen(UI_LABEL, &ui_bound);
     tasks.push((
         UI_LABEL,
@@ -183,6 +174,7 @@ fn next_probe_retry(prev: Option<Duration>) -> Duration {
 
 /// 查看器不是协议面 -> 没有 `Surface` 可借, 单独一个标签。
 const UI_LABEL: &str = "web-ui";
+const API_LABEL: &str = "api";
 
 fn log_listen(label: &str, listener: &tokio::net::TcpListener) {
     match listener.local_addr() {
@@ -223,27 +215,19 @@ async fn bind(port: u16) -> Result<tokio::net::TcpListener> {
 
 /// base url + 查看器 (start / status 共用)。
 pub(crate) fn print_endpoints() {
-    // 每个端口都接全部协议 -> 只报一个 base url, 其余端口只为旧配置保留。
-    let [base, legacy @ ..] = Surface::ALL;
-    let legacy = legacy
-        .iter()
-        .map(|s| s.port().to_string())
-        .collect::<Vec<_>>()
-        .join(" / ");
     println!(
         "- {:<13} http://{}:{} (OpenAI / Anthropic / Codex 协议都接, 按 model 分流)",
         "base url",
         provider::HOST,
-        base.port()
+        provider::PORT
     );
     // 逃生口不出现在任何客户端配置里 -> 不在这里提就没人知道。
     // 中文宽度说明符会排不齐 -> 走两空格缩进, 不对列。
     println!(
         "  透传口: http://{}:{}/backend-api/codex/* (打上游私有端点, 如 /usage 查额度)",
         provider::HOST,
-        base.port()
+        provider::PORT
     );
-    println!("  旧端口 {legacy} 继续可用, 已有配置不用改");
     println!(
         "- {UI_LABEL:<13} http://{}:{} (浏览器打开看往返记录)",
         provider::HOST,

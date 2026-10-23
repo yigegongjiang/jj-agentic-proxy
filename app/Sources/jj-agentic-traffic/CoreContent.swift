@@ -3,7 +3,7 @@ import Foundation
 // 「核心内容」视图: 把一次往返里真正有语义的东西 (对话轮次 / 模型产出 / 工具调用 / usage)
 // 抽成纯文本。SSE 尤其需要 —— 上百帧 `event:` / `data:` 里, 真正的回复只是被切碎的几行字。
 //
-// 覆盖三种方言 (与代理三个协议面一致):
+// 覆盖三种方言 (与代理接的三种协议一致):
 //   Anthropic Messages      /v1/messages         event: message_start / content_block_delta / ...
 //   OpenAI Chat Completions /v1/chat/completions data: {"choices":[{"delta":{...}}]}
 //   OpenAI Responses        /v1/responses        event: response.output_text.delta / ...
