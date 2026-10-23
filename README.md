@@ -61,7 +61,7 @@ app 上的按钮与下列子命令一一对应：
 ```bash
 jj-agentic-traffic                # 启动（已在运行则重启）
 jj-agentic-traffic stop           # 停止
-jj-agentic-traffic status         # 运行状态、账号、套餐、固定 api key
+jj-agentic-traffic status         # 运行状态、账号、套餐
 jj-agentic-traffic models         # 当前可用的 model
 jj-agentic-traffic logs -n 20     # 最近 20 条往返摘要
 jj-agentic-traffic login codex    # 或 login anthropic
@@ -73,6 +73,5 @@ jj-agentic-traffic logout all     # 或 logout codex / logout anthropic
 ## 注意事项
 
 - **所有端口只监听 `127.0.0.1`**，其他设备无法连接。端口不做鉴权，本机任何进程都能使用订阅额度并读取全部记录
-- 少数客户端（如 pi-ai）会把 api key 当作 JWT 解析，这类客户端需改填 **Console… → Status** 中给出的那份固定 key
 
 端点字段、记录格式与整体架构见 [ARCHITECTURE.md](./ARCHITECTURE.md)。

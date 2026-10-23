@@ -213,7 +213,7 @@ async fn bind(port: u16) -> Result<tokio::net::TcpListener> {
         })
 }
 
-/// base url + 透传口 + api key (start / status 共用)。
+/// base url + 透传口 (start / status 共用)。
 pub(crate) fn print_endpoints() {
     println!(
         "- {:<13} http://{}:{} (OpenAI / Anthropic / Codex 协议都接, 按 model 分流)",
@@ -228,8 +228,6 @@ pub(crate) fn print_endpoints() {
         provider::HOST,
         provider::PORT
     );
-    // 代理不校验 key, 但 codex 面的部分客户端会本地解析它 -> 给一份能直接复制的。
-    println!("- {:<13} {}", "api key", provider::CLIENT_API_KEY);
 }
 
 async fn login(name: &str) -> Result<()> {

@@ -14,6 +14,12 @@
 
 ## [Unreleased]
 
+## [0.16.3] - 2026-10-23
+
+### Removed
+
+- `start` / `status` 不再打印固定 api key; 客户端 api key 不填或填任意内容即可
+
 ## [0.16.2] - 2026-10-23
 
 ### Removed
