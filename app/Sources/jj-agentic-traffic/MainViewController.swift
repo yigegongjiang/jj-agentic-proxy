@@ -1,7 +1,7 @@
 import AppKit
 
 // 主界面 = 往返数据浏览器: 左侧一条往返一行 (新 -> 旧), 右侧上下绑定展示同一条的 Request / Response。
-// 数据源 = CLI 落下的 ~/.config/jj-agentic-proxy/log/<日期>.jsonl + 查看器端口上还没落盘的进行中记录;
+// 数据源 = CLI 落下的 ~/.config/jj-agentic-traffic/log/<日期>.jsonl + 查看器端口上还没落盘的进行中记录;
 // app 自己不发起任何代理请求。
 final class MainViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate,
                                 NSSearchFieldDelegate, NSSplitViewDelegate {
@@ -41,7 +41,7 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
     private let headLabel = NSTextField(labelWithString: "")
     private let alertLabel = NSTextField(wrappingLabelWithString: "")
     private let metaLabel = NSTextField(labelWithString: "")
-    private let legPicker = NSSegmentedControl(labels: ["Client ↔ Proxy", "Proxy ↔ Upstream"],
+    private let legPicker = NSSegmentedControl(labels: ["Client ↔ Local", "Local ↔ Upstream"],
                                                trackingMode: .selectOne, target: nil, action: nil)
     private let viewPicker = NSSegmentedControl(labels: ["核心内容", "原始报文"],
                                                 trackingMode: .selectOne, target: nil, action: nil)
@@ -105,8 +105,8 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         credLabel.font = .systemFont(ofSize: 11)
         credLabel.textColor = .secondaryLabelColor
         credLabel.lineBreakMode = .byTruncatingTail
-        style(startButton, "Start", #selector(startProxy))
-        style(stopButton, "Stop", #selector(stopProxy))
+        style(startButton, "Start", #selector(startService))
+        style(stopButton, "Stop", #selector(stopService))
         style(consoleButton, "Console…", #selector(openConsole))
 
         let items = [dot, statusLabel, credLabel, startButton, stopButton, consoleButton]
@@ -661,7 +661,7 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
     }
 
     @objc func revealLogs(_ sender: Any?) {
-        NSWorkspace.shared.open(ProxyPaths.logDir)
+        NSWorkspace.shared.open(AppPaths.logDir)
     }
 
     @objc func openConsole(_ sender: Any?) {
@@ -678,8 +678,8 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
 
     // MARK: - 服务状态: 一律经 CLI, app 不复刻任何判断
 
-    @objc private func startProxy() { runControl(["start"]) }
-    @objc private func stopProxy() { runControl(["stop"]) }
+    @objc private func startService() { runControl(["start"]) }
+    @objc private func stopService() { runControl(["stop"]) }
 
     private func runControl(_ args: [String]) {
         guard !runner.isRunning else { return }

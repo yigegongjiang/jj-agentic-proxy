@@ -1,4 +1,4 @@
-//! 往返记录: 一次 req/res 一行 JSON, 落 `~/.config/jj-agentic-proxy/log/YYYY-MM-DD.jsonl`。
+//! 往返记录: 一次 req/res 一行 JSON, 落 `~/.config/jj-agentic-traffic/log/YYYY-MM-DD.jsonl`。
 //!
 //! 记两条腿: 客户端 <-> 代理 (header + body 原样), 代理 <-> 上游 (注入后的 header + 被改写的 body)。
 //! 一行一次往返 + 单次 append 写 -> 并发请求不互相穿插, `rg` / `jq` 直接可读。
@@ -195,7 +195,7 @@ pub fn start(
     headers: &HeaderMap,
     body: &Bytes,
 ) -> Option<Record> {
-    if crate::proxy::strip_v1(path.split('?').next().unwrap_or(path)) == "/health" {
+    if crate::passthrough::strip_v1(path.split('?').next().unwrap_or(path)) == "/health" {
         return None;
     }
     let req = payload(body);
@@ -233,7 +233,7 @@ fn headers_json(h: &HeaderMap) -> Value {
     Value::Object(out)
 }
 
-// ---------- 上游那一腿 (由 proxy 层沿途填) ----------
+// ---------- 上游那一腿 (由 passthrough 层沿途填) ----------
 
 tokio::task_local! {
     static LEG: Mutex<Option<Leg>>;
@@ -1063,7 +1063,7 @@ mod tests {
 
     #[test]
     fn tail_reads_last_lines_across_chunk_boundary() {
-        let dir = std::env::temp_dir().join(format!("jj-proxy-reqlog-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jj-traffic-reqlog-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("2026-07-31.jsonl");

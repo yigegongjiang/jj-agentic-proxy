@@ -100,7 +100,7 @@ async fn refresh(
             tracing::warn!(provider = %p, error = %e, "刷新 access token 失败");
             if e.to_string().contains("invalid_grant") {
                 return Err(e.context(format!(
-                    "{p} refresh token 已失效, 请重新执行 `jj-agentic-proxy login {p}`"
+                    "{p} refresh token 已失效, 请重新执行 `jj-agentic-traffic login {p}`"
                 )));
             }
             Err(e)
@@ -109,7 +109,7 @@ async fn refresh(
 }
 
 fn logged_in(p: Provider, cred: Option<Credential>) -> Result<Credential> {
-    cred.ok_or_else(|| anyhow!("{p} 未登录: 先执行 `jj-agentic-proxy login {p}`"))
+    cred.ok_or_else(|| anyhow!("{p} 未登录: 先执行 `jj-agentic-traffic login {p}`"))
 }
 
 fn refresh_needed(cred: &Credential, rejected_token: Option<&str>) -> bool {

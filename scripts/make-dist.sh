@@ -10,7 +10,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 REPO="$PWD"
-APP_NAME="jj-agentic-proxy"
+APP_NAME="jj-agentic-traffic"
 DIST="$REPO/dist"
 ARCHS="arm64 x86_64"
 EXPECT_VERSION=""

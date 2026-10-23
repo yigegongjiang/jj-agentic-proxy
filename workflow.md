@@ -13,17 +13,17 @@
 - `cargo`: 本机 toolchain; 未登录 crates.io -> 不发布 crate
 - `swift`: 本机 Swift 6.2+ / Xcode 26+ (查看器 app 用 `defaultIsolation`)
 - `scripts/install-local.sh`: 本机预部署总入口 = `app/package.sh` + 装 `/Applications` + 链接 `~/.local/bin` + `--version` 自检; 只给开发用 (用户侧安装 = 拖 dmg + 开 app 点「好」, 不跑脚本)
-- `app/package.sh [--arch arm64|x86_64]`: CLI + viewer 单架构构建 -> 组装 bundle -> ad-hoc 签名 -> `app/build/jj-agentic-proxy.app`; 只构建, 不装机
+- `app/package.sh [--arch arm64|x86_64]`: CLI + viewer 单架构构建 -> 组装 bundle -> ad-hoc 签名 -> `app/build/jj-agentic-traffic.app`; 只构建, 不装机
 - `scripts/make-dist.sh [--expect-version X.Y.Z]`: 分发打包 -> `dist/` (arm64 / x86_64 各一个 dmg, 外加 SHA256SUMS + RELEASE_NOTES.md); CI 跑的就是它, 本机原样可复现
 - `scripts/clean.sh [--all] [--dry-run]`: 清本机编译产物; 默认只清 debug 层 (`target/debug` + `app/.build`), 留 cargo release 缓存
 
 # 调试
 
-- CLI 往返记录: `jj-agentic-proxy logs -n 20` 看摘要; 原始行 `jq` 直接读 `~/.config/jj-agentic-proxy/log/<日期>.jsonl`
-- app 快编: `cd app && swift build` -> `./.build/debug/jj-agentic-proxy`
-- app 界面自检 (不需录屏授权): `./.build/debug/jj-agentic-proxy --snapshot /tmp/app.png [--filter <词>]` -> 离屏渲染主窗口, 直接看 PNG; `--filter` 预填过滤框 -> 首行即想看的那条
+- CLI 往返记录: `jj-agentic-traffic logs -n 20` 看摘要; 原始行 `jq` 直接读 `~/.config/jj-agentic-traffic/log/<日期>.jsonl`
+- app 快编: `cd app && swift build` -> `./.build/debug/jj-agentic-traffic`
+- app 界面自检 (不需录屏授权): `./.build/debug/jj-agentic-traffic --snapshot /tmp/app.png [--filter <词>]` -> 离屏渲染主窗口, 直接看 PNG; `--filter` 预填过滤框 -> 首行即想看的那条
 - 磁盘吃紧时 `./scripts/clean.sh` (先 `--dry-run` 看体积)
-- 改完代理行为后先 `cargo build --release` + `./target/release/jj-agentic-proxy start` 再打真实请求验证: daemon 跟着这份二进制跑, 不碰 `/Applications`; 与已装版共用 pid 文件 + 端口, start 自带 restart -> 不会双实例
+- 改完代理行为后先 `cargo build --release` + `./target/release/jj-agentic-traffic start` 再打真实请求验证: daemon 跟着这份二进制跑, 不碰 `/Applications`; 与已装版共用 pid 文件 + 端口, start 自带 restart -> 不会双实例
 
 # 发布
 
@@ -66,14 +66,14 @@ cargo build --release
 ./scripts/install-local.sh
 ```
 
-- app: `cargo build --release` + `swift build -c release` -> 组装 bundle (viewer + `Contents/MacOS/jj-agentic-proxy-cli`) -> 由内向外 ad-hoc 签名 (先 CLI 后 bundle, DR 钉 identifier-only) -> `pkill` 旧 viewer -> `ditto` 到 `/Applications`
-- 终端入口: `ln -sfn` 把 `~/.local/bin/jj-agentic-proxy` 指到包体内那份 -> `--version` 自检
+- app: `cargo build --release` + `swift build -c release` -> 组装 bundle (viewer + `Contents/MacOS/jj-agentic-traffic-cli`) -> 由内向外 ad-hoc 签名 (先 CLI 后 bundle, DR 钉 identifier-only) -> `pkill` 旧 viewer -> `ditto` 到 `/Applications`
+- 终端入口: `ln -sfn` 把 `~/.local/bin/jj-agentic-traffic` 指到包体内那份 -> `--version` 自检
 - 只覆盖同名 app / 同名入口, 不影响 `~/.local/bin` 里其他 `jj-*` CLI
 - 验证: 输出的版本与本次 tag 一致
 
 > MUST NOT 在已装 bundle 内原地替换 CLI 后重签: 改密封资源会连带重写 viewer 的嵌入签名, 代码签名缓存失效 -> `Killed: 9`。整包重建 (`package.sh`) 是唯一升级路径。
 > `pkill` MUST 保持 `-f -x` 精确匹配 viewer 完整路径: 模糊匹配会把包体内 CLI 跑的 daemon 一起杀掉。
-> 旧进程仍在跑时: 装完执行 `jj-agentic-proxy start` 即切到新版本 (start 自带 restart)。
+> 旧进程仍在跑时: 装完执行 `jj-agentic-traffic start` 即切到新版本 (start 自带 restart)。
 
 ## 4. 发布
 
@@ -115,4 +115,4 @@ gh release view vX.Y.Z   # 资产: arm64/x86_64 各一个 dmg, 外加 SHA256SUMS
 
 > 默认档删掉整个 `app/.build`, Swift 侧 (含 release) 一并冷编; cargo release 缓存留着。
 > `--all` 之后下一次 `install-local.sh` / `make-dist.sh` 全冷启, 双架构 dmg 尤其久。
-> 脚本认不出仓库根 (`Cargo.toml` 里没有 `name = "jj-agentic-proxy"`) 直接 exit 2, 不接受路径参数 —— 里面全是 `rm -rf`。
+> 脚本认不出仓库根 (`Cargo.toml` 里没有 `name = "jj-agentic-traffic"`) 直接 exit 2, 不接受路径参数 —— 里面全是 `rm -rf`。

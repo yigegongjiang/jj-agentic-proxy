@@ -8,7 +8,7 @@ nonisolated enum TrafficReader {
 
     /// 已有记录的日期, 新 -> 旧。
     static func days() -> [String] {
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: ProxyPaths.logDir.path)) ?? []
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: AppPaths.logDir.path)) ?? []
         return names
             .filter { $0.hasSuffix(".\(ext)") && $0.count == "0000-00-00.\(ext)".count }
             .map { String($0.dropLast(ext.count + 1)) }
@@ -16,7 +16,7 @@ nonisolated enum TrafficReader {
     }
 
     static func file(day: String) -> URL {
-        ProxyPaths.logDir.appendingPathComponent("\(day).\(ext)", isDirectory: false)
+        AppPaths.logDir.appendingPathComponent("\(day).\(ext)", isDirectory: false)
     }
 
     struct Batch: Sendable {

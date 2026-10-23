@@ -84,7 +84,7 @@ pub fn request(req: &Value, model: &str) -> Value {
     }
     out.insert("max_tokens".into(), json!(limit));
 
-    // 白名单重建 -> 客户端的采样参数 (见 proxy::SAMPLING_KEYS) 天然不转发, 与透传面一致。
+    // 白名单重建 -> 客户端的采样参数 (见 passthrough::SAMPLING_KEYS) 天然不转发, 与透传面一致。
     let mut cfg = Map::new();
     if let Some(e) = effort {
         cfg.insert("effort".into(), json!(e));
@@ -114,7 +114,7 @@ pub fn request(req: &Value, model: &str) -> Value {
         }
     }
     // OAuth 凭证要求 system 首块带 Claude Code 前缀。
-    crate::proxy::inject_claude_code_prefix(&mut out);
+    crate::passthrough::inject_claude_code_prefix(&mut out);
     Value::Object(out)
 }
 

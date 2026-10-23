@@ -16,8 +16,8 @@ final class CommandRunner {
     ) {
         guard process == nil else { return }
         output.removeAll(keepingCapacity: false)
-        guard let cli = ProxyPaths.cli() else {
-            onText(ProxyPaths.cliHint)
+        guard let cli = AppPaths.cli() else {
+            onText(AppPaths.cliHint)
             onExit(-1)
             return
         }

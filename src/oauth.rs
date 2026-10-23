@@ -440,7 +440,7 @@ fn read_request_target(stream: &mut TcpStream) -> Option<String> {
 
 fn respond(stream: &mut TcpStream, status: u16, message: &str) {
     let body = format!(
-        "<!doctype html><meta charset=utf-8><title>jj-agentic-proxy</title>\
+        "<!doctype html><meta charset=utf-8><title>jj-agentic-traffic</title>\
          <body style=\"font:16px/1.6 system-ui;padding:3rem\">{message}</body>"
     );
     let head = format!(

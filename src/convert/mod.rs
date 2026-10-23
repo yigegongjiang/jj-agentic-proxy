@@ -15,8 +15,8 @@ use futures_util::StreamExt as _;
 use rand::RngCore as _;
 use serde_json::{json, Map, Value};
 
+use crate::passthrough::json_body;
 use crate::provider::Provider;
-use crate::proxy::json_body;
 use crate::sse;
 use crate::store::now;
 
@@ -152,7 +152,7 @@ pub fn stream_response(
         .unwrap_or_else(|e| {
             json_body(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                json!({ "error": { "message": e.to_string(), "type": "proxy_error" } }),
+                json!({ "error": { "message": e.to_string(), "type": "api_error" } }),
             )
         })
 }

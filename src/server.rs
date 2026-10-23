@@ -1,4 +1,4 @@
-//! 端口层: 一个端口一个 provider, 业务按官方 api key 方式调用 -> proxy 换成 CLI (OAuth) 渠道。
+//! 端口层: 一个端口一个 provider, 业务按官方 api key 方式调用 -> 本机换成 CLI (OAuth) 渠道。
 //!
 //! 客户端全程以为自己在直连官方付费 api, 因此:
 //! - 两家 base url 约定 (域名根 / `.../v1`) 都要通 -> 路径先归一
@@ -19,8 +19,8 @@ use axum::Router;
 use serde_json::{json, Value};
 
 use crate::convert;
+use crate::passthrough::{self, json_body, App, Dialect, Port};
 use crate::provider::{self, Provider, Surface};
-use crate::proxy::{self, json_body, App, Dialect, Port};
 use crate::reqlog;
 use crate::store::now;
 
@@ -28,7 +28,7 @@ pub fn router(port: Port) -> Router {
     Router::new()
         .fallback(any(dispatch))
         .layer(DefaultBodyLimit::disable())
-        .layer(proxy::cors())
+        .layer(passthrough::cors())
         .with_state(port)
 }
 
@@ -68,7 +68,7 @@ async fn route(
 ) -> Response {
     let surface = state.surface;
     let dialect = Dialect::of(surface, &headers);
-    let path = proxy::strip_v1(uri.path());
+    let path = passthrough::strip_v1(uri.path());
     // Anthropic 方言在 claude-code 端口落回透传 -> 拿到官方原样形状; 其余端口只讲 OpenAI。
     let openai_list = method == Method::GET && dialect == Dialect::OpenAI;
     // claude-openai 端口的 chat/completions 由 Anthropic 官方兼容层出结果 -> 落透传。
@@ -85,13 +85,13 @@ async fn route(
     }
 
     match path {
-        "/health" => proxy::health(state).await,
+        "/health" => passthrough::health(state).await,
         "/chat/completions" if local_chat => chat_completions(state, body).await,
         "/models" if openai_list => openai_models(state).await,
         p if openai_list && p.starts_with("/models/") => {
             openai_model(state, &p["/models/".len()..]).await
         }
-        _ => proxy::handle(state, method, uri, headers, body).await,
+        _ => passthrough::handle(state, method, uri, headers, body).await,
     }
 }
 
@@ -135,7 +135,7 @@ async fn chat_completions(State(port): State<Port>, body: Bytes) -> Response {
 
     let started = Instant::now();
     // 上游一律 SSE: 客户端要非流式时由转换层聚合。
-    let resp = match proxy::upstream(
+    let resp = match passthrough::upstream(
         &port.app,
         p,
         Method::POST,
@@ -162,7 +162,7 @@ async fn chat_completions(State(port): State<Port>, body: Bytes) -> Response {
     );
     if !status.is_success() {
         // chat/completions 永远是 OpenAI 协议 -> 错误信封也固定 OpenAI 形状。
-        return proxy::normalize_error(resp, Dialect::OpenAI).await;
+        return passthrough::normalize_error(resp, Dialect::OpenAI).await;
     }
     if want_stream {
         convert::stream_response(p, model, resp, include_usage)
@@ -227,7 +227,7 @@ pub(crate) async fn list(app: &Arc<App>, p: Provider) -> Vec<Value> {
             "slug",
         ),
     };
-    let sent = proxy::upstream(
+    let sent = passthrough::upstream(
         app,
         p,
         Method::GET,

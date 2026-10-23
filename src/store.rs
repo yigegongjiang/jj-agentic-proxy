@@ -1,9 +1,9 @@
-//! 凭证落盘: `~/.config/jj-agentic-proxy/auth.json`, 0600, 原子写。
+//! 凭证落盘: `~/.config/jj-agentic-traffic/auth.json`, 0600, 原子写。
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -65,7 +65,30 @@ pub fn config_dir() -> PathBuf {
                 .unwrap_or_else(|| ".".to_string());
             PathBuf::from(home).join(".config")
         });
-    base.join("jj-agentic-proxy")
+    base.join("jj-agentic-traffic")
+}
+
+/// v0.14 及以前的配置目录名 (改名前)。
+const LEGACY_DIR_NAME: &str = "jj-agentic-proxy";
+
+/// 改名迁移: 新目录不存在而旧目录在 -> 整目录 rename, 凭证 / 往返记录 / pid 文件一起搬。
+/// 只搬不合并: 新目录一旦存在即视为已迁移。rename 搬的是 inode -> 旧版 daemon 持有的 pid 锁随之过来,
+/// 新版 `start` 照常探到并先停掉它, 不会双占端口。失败只告警: 等同未登录, 不阻断启动。
+pub fn migrate_legacy_dir() {
+    let dir = config_dir();
+    if let Err(e) = migrate_legacy(&dir) {
+        eprintln!("迁移旧配置目录失败 ({}): {e:#}", dir.display());
+    }
+}
+
+fn migrate_legacy(dir: &Path) -> Result<bool> {
+    let legacy = dir.with_file_name(LEGACY_DIR_NAME);
+    if dir.exists() || !legacy.is_dir() {
+        return Ok(false);
+    }
+    fs::rename(&legacy, dir)
+        .with_context(|| format!("{} -> {}", legacy.display(), dir.display()))?;
+    Ok(true)
 }
 
 pub fn auth_path() -> PathBuf {
@@ -177,4 +200,32 @@ pub fn remove(provider: Provider) -> Result<bool> {
         let existed = store.remove(provider.key()).is_some();
         Ok((existed, existed))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migrate_legacy_moves_once_never_merges() {
+        let base = std::env::temp_dir().join(format!("jj-traffic-migrate-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let legacy = base.join(LEGACY_DIR_NAME);
+        let dir = base.join("jj-agentic-traffic");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("auth.json"), "{}").unwrap();
+
+        assert!(migrate_legacy(&dir).unwrap());
+        assert!(!legacy.exists());
+        assert_eq!(fs::read_to_string(dir.join("auth.json")).unwrap(), "{}");
+
+        // 新目录已在: 旧目录再出现也不动
+        fs::create_dir_all(&legacy).unwrap();
+        assert!(!migrate_legacy(&dir).unwrap());
+        assert!(legacy.exists());
+
+        // 都不在: 无事发生
+        fs::remove_dir_all(&base).unwrap();
+        assert!(!migrate_legacy(&dir).unwrap());
+    }
 }

@@ -91,7 +91,7 @@ final class ConsoleWindowController: NSWindowController {
         textView.minSize = .zero
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textView.textContainer?.widthTracksTextView = true
-        textView.string = "点上面的按钮跑对应的 jj-agentic-proxy 子命令。"
+        textView.string = "点上面的按钮跑对应的 jj-agentic-traffic 子命令。"
 
         let scroll = NSScrollView()
         scroll.documentView = textView
@@ -143,7 +143,7 @@ final class ConsoleWindowController: NSWindowController {
 
     private func run(_ args: [String]) {
         guard !runner.isRunning else { return }
-        header = "$ jj-agentic-proxy \(args.joined(separator: " "))\n"
+        header = "$ jj-agentic-traffic \(args.joined(separator: " "))\n"
         body = ""
         render()
         setBusy(true)

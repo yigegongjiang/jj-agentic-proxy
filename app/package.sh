@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Release 构建 -> 组装 .app (viewer + CLI 同一 bundle) -> ad-hoc 签名。产物: app/build/jj-agentic-proxy.app
+# Release 构建 -> 组装 .app (viewer + CLI 同一 bundle) -> ad-hoc 签名。产物: app/build/jj-agentic-traffic.app
 # 只构建, 不安装; 本机装机走 scripts/install-local.sh (构建 + 装 /Applications + 链接终端命令)。
 # 版本号取自根 Cargo.toml (CLI 与 app 同版本, 单一信源)。Debug 用 `swift build`。
 # CLI 二进制随 bundle 分发 -> 升级 app 即升级 CLI; ~/.local/bin 那个入口只是指过去的 symlink。
@@ -11,7 +11,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$ROOT/.." && pwd)"
-APP_NAME="jj-agentic-proxy"
+APP_NAME="jj-agentic-traffic"
 CLI_NAME="$APP_NAME-cli"
 ARCH="$(uname -m)"
 

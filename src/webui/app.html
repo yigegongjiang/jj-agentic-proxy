@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>jj-agentic-proxy</title>
+<title>jj-agentic-traffic</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='4' fill='%232d7ff9'/%3E%3Cpath d='M4 11.5V4.5h1.6v5.6h2.2v1.4zm5.2 0V4.5h1.6v7z' fill='white'/%3E%3C/svg%3E">
 <style>
 :root {
@@ -142,7 +142,7 @@ tbody tr.live td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
   <span id="state">读取状态…</span>
   <span id="cred"></span>
   <span class="spacer"></span>
-  <button id="btn-start" disabled title="页面由代理进程本身提供 —— 进程没起来时页面也不存在, 所以只能在终端执行 `jj-agentic-proxy start`">Start</button>
+  <button id="btn-start" disabled title="页面由代理进程本身提供 —— 进程没起来时页面也不存在, 所以只能在终端执行 `jj-agentic-traffic start`">Start</button>
   <button id="btn-stop">Stop</button>
   <button id="btn-console" class="active">Console…</button>
 </div>
@@ -178,7 +178,7 @@ tbody tr.live td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
     <div id="meta"></div>
     <div id="picks">
       <span class="seg" id="leg">
-        <button data-i="0" class="on">Client ↔ Proxy</button><button data-i="1">Proxy ↔ Upstream</button>
+        <button data-i="0" class="on">Client ↔ Local</button><button data-i="1">Local ↔ Upstream</button>
       </span>
       <span class="spacer"></span>
       <span class="seg" id="view" title="核心内容 = 对话轮次 / 模型产出 / 工具调用; 原始报文 = 起始行 + header + body 原文 (⌘D 切换)">
@@ -279,7 +279,7 @@ const cap = s => clamp(s, TOTAL_CAP, '已截断展示');
 const clampBlock = s => clamp(s, BLOCK_CAP, '本段已截断');
 
 /* ============================================================
-   核心内容视图 —— app/Sources/jj-agentic-proxy/CoreContent.swift 的移植
+   核心内容视图 —— app/Sources/jj-agentic-traffic/CoreContent.swift 的移植
    把一次往返里真正有语义的东西 (对话轮次 / 模型产出 / 工具调用 / usage) 抽成纯文本。
    覆盖三种方言, 认不出就回退成事件清单或原 JSON -> 永远给得出东西, 不空屏。
    ============================================================ */
@@ -1077,7 +1077,7 @@ const S = {
   shownLive: false, // 详情面板当前展示的是进行中快照
   detail: null,
   detailToken: 0,
-  leg: 0,         // 0 = Client ↔ Proxy, 1 = Proxy ↔ Upstream
+  leg: 0,         // 0 = Client ↔ Local, 1 = Local ↔ Upstream
   view: 0,        // 0 = 核心内容, 1 = 原始报文
   scanning: false,
   loginTimer: null,
@@ -1487,7 +1487,7 @@ async function runCommand(cmd) {
       const lines = [];
       for (const p of r.providers) {
         lines.push(`${p.provider} (端口 ${p.ports})`);
-        if (!p.logged_in) { lines.push(`  未登录 (\`jj-agentic-proxy login ${p.provider}\`)`); continue; }
+        if (!p.logged_in) { lines.push(`  未登录 (\`jj-agentic-traffic login ${p.provider}\`)`); continue; }
         if (!p.models.length) lines.push('  取不到列表 (上游异常或凭证失效)');
         for (const m of p.models) lines.push(`  ${m}`);
       }
@@ -1515,7 +1515,7 @@ async function runCommand(cmd) {
     return;
   }
   if (cmd === 'stop') {
-    if (!confirm('停止代理? 重新启动需要在终端执行 `jj-agentic-proxy start`')) return;
+    if (!confirm('停止代理? 重新启动需要在终端执行 `jj-agentic-traffic start`')) return;
     try {
       const r = await api('/api/stop', { method: 'POST' });
       log(r.message);

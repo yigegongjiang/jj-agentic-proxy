@@ -4,12 +4,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var window: NSWindow!
 
     // 手动持久化 content 尺寸 (绕开状态恢复冲突); 位置居中于鼠标所在屏 (多显示器友好)
-    private static let widthKey = "JJProxyApp.windowW"
-    private static let heightKey = "JJProxyApp.windowH"
+    private static let widthKey = "JJTrafficApp.windowW"
+    private static let heightKey = "JJTrafficApp.windowH"
     private static let defaultSize = NSSize(width: 1180, height: 740)
     private static let minSize = NSSize(width: 900, height: 520)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        AppPaths.migrateLegacy() // 先于主窗口读日志目录
         NSApp.mainMenu = MainMenu.build()
         setupWindow()
         NSApp.activate(ignoringOtherApps: true)
@@ -26,7 +27,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "jj-agentic-proxy"
+        window.title = "jj-agentic-traffic"
         window.contentMinSize = Self.minSize
         window.isRestorable = false
         window.delegate = self

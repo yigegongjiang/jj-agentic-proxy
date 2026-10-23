@@ -6,7 +6,7 @@ MUST NOT 写安装 · 上手 (→ README.md) / 发布流程 (→ workflow.md) / 
 - 反劣化理由 (实测坑 / 为什么这么选) MUST 留, 删掉等于给未来的 agent 留回退空间
 ```
 
-# jj-agentic-proxy 内部实现
+# jj-agentic-traffic 内部实现
 
 对外用法见 [README.md](./README.md); 本文只写实现事实。
 
@@ -25,11 +25,11 @@ MUST NOT 写安装 · 上手 (→ README.md) / 发布流程 (→ workflow.md) / 
 | `POST /v1/complete` | 10011 | `api.anthropic.com/v1/complete` | Anthropic legacy Text Completions |
 | `GET /health` | 全部 | — | 本端口协议面 + 登录状态 + 可用路径 |
 
-- 端口层只截 Chat Completions 与模型列表, 其余路径一律落原生透传 (`proxy::resolve`): 按端口前缀白名单放行 -> 上游同路径, body 不改协议只换身份
+- 端口层只截 Chat Completions 与模型列表, 其余路径一律落原生透传 (`passthrough::resolve`): 按端口前缀白名单放行 -> 上游同路径, body 不改协议只换身份
   - 10011: `/messages` / `/models` / `/complete` 及其子路径 -> `api.anthropic.com/v1{path}`
   - 10010: `/responses` 及其子路径 + `/backend-api/codex/*` -> `chatgpt.com/backend-api/codex{...}`
   - 10012: 只有 `/chat/completions` (交给上游官方兼容层), 别的一概 404
-  - 不在白名单的路径不猜: 404 里列出本端口可用路径 (`proxy::endpoints`, 与 `/health` 同一份)
+  - 不在白名单的路径不猜: 404 里列出本端口可用路径 (`passthrough::endpoints`, 与 `/health` 同一份)
   - `endpoints` 列表未含 `/v1/complete`, 而 `resolve` 白名单含 -> 该路径实际转发但不出现在 404 提示与 `/health` 里 (代码不一致, 未改行为)
 - Chat Completions 的上游由端口决定, `model` 只取模型名 (允许 `anthropic/`、`openai/` 前缀)
 - 10010 / 10011 本地转换覆盖: 流式 / 非流式、tools + 工具结果回传、图片 (url 与 data URI)、`response_format`、`reasoning_effort`; 思考内容出 `reasoning_content`
@@ -55,7 +55,7 @@ curl http://127.0.0.1:10010/backend-api/codex/usage  # 订阅额度: plan_type +
 
 ## 往返记录
 
-经三端口的每次 req/res 落 `~/.config/jj-agentic-proxy/log/<日期>.jsonl`, 一行一次往返 (JSON Lines, `rg` / `jq` 直接可读), **两条腿都记**: 客户端 <-> 代理, 代理 <-> 上游.
+经三端口的每次 req/res 落 `~/.config/jj-agentic-traffic/log/<日期>.jsonl`, 一行一次往返 (JSON Lines, `rg` / `jq` 直接可读), **两条腿都记**: 客户端 <-> 代理, 代理 <-> 上游.
 
 <!-- prettier-ignore -->
 | 字段 | 说明 |
@@ -88,7 +88,7 @@ curl http://127.0.0.1:10010/backend-api/codex/usage  # 订阅额度: plan_type +
   - 异常 = `status` 0 / >= 400 / 带 `incomplete` 或 `error` (200 开头也算): 状态列 `200 ⚠︎` 橙 / 失败红, 悬停出原因; 「只看异常」勾选过滤; 计数栏带当天异常数 + token 合计
   - 详情顶部三行: 结果 · model · 耗时 · 用量 (含缓存命中率) / 异常原因 (仅异常) / 时刻 · 完整请求行 · surface · id
   - 请求面板 (核心内容) 打开即停在最后一轮 (`── [N]`), 长对话不用滚过 system
-- 两组切换互不干扰: `Client ↔ Proxy` / `Proxy ↔ Upstream` 选哪条腿, `核心内容` / `原始报文` 选哪种读法 (⌘D)
+- 两组切换互不干扰: `Client ↔ Local` / `Local ↔ Upstream` 选哪条腿, `核心内容` / `原始报文` 选哪种读法 (⌘D)
 - 核心内容 (默认): 几百帧碎 SSE 先重建成完整消息再排纯文本, 请求侧从嵌套 JSON 抽出对话轮次 (system 或 `instructions` + 逐轮消息, 轮内工具调用与结果缩进挂在该轮下), 响应给方言 / 帧数 / 是否收到收尾事件 / usage 摘要后按产出顺序排 text / thinking / tool_call 段; 工具参数逐帧拼回完整 JSON, 流被截断没拼全就原样给
 - 核心内容认三种方言 (与三个协议面一致): Anthropic Messages / OpenAI Chat Completions / OpenAI Responses, 流式与非流式同一套渲染; 认不出就每帧压成一行, 非对话请求 (`/v1/models`、`count_tokens`) 回退成原 JSON -> 永远给得出东西
 - 「空」与「拿不到」分开说: 上游只回签名不回思考正文时标注加密, 不显示成空内容
@@ -121,6 +121,7 @@ curl http://127.0.0.1:10010/backend-api/codex/usage  # 订阅额度: plan_type +
 - `start` 拉起后台进程后等它写下就绪标记才报成功 (不靠「端口通」, 避免把别人占的端口认成自己); `stop` = SIGTERM -> 等锁释放 -> 5s 未退则 SIGKILL
 - 后台日志单文件 8MB 上限, 满则轮转一份 -> 磁盘占用恒定, 不随运行时长增长
 - 认证: OAuth PKCE (S256); 回调端口被上游 client_id allow-list 写死 (Anthropic 54545 / Codex 1455), 登录时须空闲
+- 改名迁移 (v0.15 `jj-agentic-proxy` -> `jj-agentic-traffic`): CLI 每次启动 + app 打开时, 新配置目录不在而旧名目录在 -> 整目录 rename (凭证 / 往返记录 / pid 锁一起搬), 只搬不合并; app 装终端入口时顺手删旧名 symlink
 - 凭证: `auth.json` 进程间串行 + 原子写 + 0600; login/logout 热更新; 到期前 300s 主动刷新; 上游 401 时强制续期并重试一次
   - 刷新跑在独立 task, 进程内单飞锁随之移交 -> 客户端断开只取消等待, 不中断「换 token -> 落盘」. 实测坑 (09-15 / 08-03): 刷新内联在请求 future 里, 客户端恰在刷新途中断开 -> 上游已轮换 refresh token 而新值未落盘 -> 持续 `invalid_grant` 直到重新 login
   - 跨进程: daemon 与 `models` 等 CLI 子进程各持进程内锁互不可见 -> 另加 `refresh-<provider>.lock` (flock) 串行刷新, 拿到锁后以盘上为准重判; 不复用 `auth.lock`: 持锁期间要 `put`, flock 按打开的文件描述计, 同一把会自锁
@@ -142,7 +143,7 @@ curl http://127.0.0.1:10010/backend-api/codex/usage  # 订阅额度: plan_type +
 - 上游错误重裹成方言信封时保留 `retry-after` / `request-id` / `x-request-id`
 - CLI 渠道与官方 api key 渠道的差异由代理抹平: 上游硬拒 `stream:false` 与字符串 `input`, 代理补齐后再把 SSE 聚合成官方非流式对象
 - 响应逐块转发不缓冲 -> SSE 首字延迟与官方 CLI 一致; 请求体无大小上限
-- 上游重试 (`proxy::upstream`, 总次数 ≤ 3 含 401 续期): 仅在响应头阶段 (客户端尚未收到字节) 对 408 / 500 / 502 / 503 / 504 / 529 与建连失败重试, 退避 1s / 2s, `retry-after` ≤ 8s 时听上游; 429 不重试 (订阅额度窗口, 实测 `retry-after` 226s 起); 请求发出后的超时 / 断开不重放 (上游可能已计费); 流开始后的中断原样交给客户端
+- 上游重试 (`passthrough::upstream`, 总次数 ≤ 3 含 401 续期): 仅在响应头阶段 (客户端尚未收到字节) 对 408 / 500 / 502 / 503 / 504 / 529 与建连失败重试, 退避 1s / 2s, `retry-after` ≤ 8s 时听上游; 429 不重试 (订阅额度窗口, 实测 `retry-after` 226s 起); 请求发出后的超时 / 断开不重放 (上游可能已计费); 流开始后的中断原样交给客户端
 - 上游按 Codex CLI 版本 gate 新模型: 版本号 = max(内置下限, `~/.codex/models_cache.json` `client_version` (已装版本), `version.json` `latest_version`, GitHub `openai/codex` 最新正式版), 每 10 分钟重读
   - 实测坑: 启动时读一次即冻结, daemon 长跑后被上游按旧版本拒新模型; 按 0.146.0 请求时 gpt-6 系列整批不列
   - 最新正式版 = 官方 CLI 升级检查同源 (`releases/latest`, tag `rust-vX.Y.Z`), daemon 启动取一次后每小时一次, 5s 超时, 未登录 Codex 不取 -> 本机没装 codex 也不掉队
@@ -158,7 +159,7 @@ curl http://127.0.0.1:10010/backend-api/codex/usage  # 订阅额度: plan_type +
 src/main.rs                    CLI (start / stop / login / logout / status / models / logs) + 四个固定端口 + 优雅退出
 src/daemon.rs                  后台常驻: 单实例锁 + 探活 + 启停 + 日志封顶
 src/server.rs                  端口层: Chat Completions + 模型列表 + 往返记录挂点, 其余落透传
-src/proxy.rs                   透传: 上游由端口定 + header 注入 + body 规范化 + 带凭证请求上游
+src/passthrough.rs             透传: 上游由端口定 + header 注入 + body 规范化 + 带凭证请求上游
 src/convert/ + sse.rs          Chat Completions <-> OpenAI Responses (codex.rs) / Anthropic Messages (anthropic.rs); mod.rs 增量模型 + 流式回传 / 非流式聚合; sse.rs 解码
 src/reqlog.rs                  往返记录: 一行一次 req/res + 按天分文件 (不清理) + logs 摘要
 src/{auth,oauth,store}.rs      凭证内存态 / 到期预判 / 单飞刷新; PKCE + 本机回调 + 两家 token 换取·刷新; auth.json 原子写 0600
@@ -169,7 +170,7 @@ scripts/make-dist.sh           分发打包: arm64 / x86_64 各构建一套 -> d
 .github/workflows/release.yml  打 tag 即发版: 验证 + 跑 make-dist.sh + 产物传 GitHub Release (CI 是脚本的薄壳, 本机可复现)
 
 app/                           macOS 查看器 app: SwiftPM + AppKit (macOS 13+, 零第三方依赖); package.sh 组装 bundle, Resources/ 存 Info.plist.in (`@VERSION@` 占位) + AppIcon.icon (Icon Composer 分层 SVG, package.sh 经 actool 编译)
-app/Sources/jj-agentic-proxy/
+app/Sources/jj-agentic-traffic/
   MainViewController.swift + BodyPane.swift            列表 / 过滤 / follow / 详情绑定 + 单 body 面板 (等宽只读 + Copy)
   CoreContent.swift                                    核心内容视图: SSE 重建 + 三方言归一 + 纯文本排版
   TrafficRecord.swift + TrafficReader.swift            行首摘要解析 + 日期枚举 / 增量索引 / 按 (offset, length) 现取全文
@@ -177,5 +178,5 @@ app/Sources/jj-agentic-proxy/
   ConsoleWindowController.swift + CommandRunner.swift  CLI 控制台面板 + 子进程输出实时回吐
   main.swift + AppDelegate.swift + MainMenu.swift      入口 (`--snapshot <png> [--filter <词>]` 界面自检) / 主窗口 + 尺寸持久化 / 主菜单
   CLIInstall.swift                                     终端命令入口: 打开 app 时检查 ~/.local/bin symlink, 缺则弹窗一键建 + 摘 quarantine + `--version` 自检
-  ProxyPaths.swift                                     CLI 定位 (首选自身同目录那份) / 日志目录
+  AppPaths.swift                                       CLI 定位 (首选自身同目录那份) / 日志目录 / 旧名目录迁移
 ```

@@ -26,8 +26,8 @@ done
 cd "$(dirname "$0")/.."
 
 # 这个脚本除了 rm -rf 没别的动作: 认不出是本仓库就退出, MUST NOT 在错误的 cwd 上开删
-grep -q '^name = "jj-agentic-proxy"$' Cargo.toml 2>/dev/null \
-  || { echo "这里不是 jj-agentic-proxy 仓库根 ($PWD): 拒绝删除" >&2; exit 2; }
+grep -q '^name = "jj-agentic-traffic"$' Cargo.toml 2>/dev/null \
+  || { echo "这里不是 jj-agentic-traffic 仓库根 ($PWD): 拒绝删除" >&2; exit 2; }
 
 if [ "$MODE" = all ]; then
   PATHS=(target app/.build app/build dist)

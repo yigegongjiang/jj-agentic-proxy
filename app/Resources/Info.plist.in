@@ -3,9 +3,9 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key>
-    <string>jj-agentic-proxy</string>
+    <string>jj-agentic-traffic</string>
     <key>CFBundleDisplayName</key>
-    <string>jj-agentic-proxy</string>
+    <string>jj-agentic-traffic</string>
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleLocalizations</key>
@@ -13,9 +13,9 @@
         <string>en</string>
     </array>
     <key>CFBundleExecutable</key>
-    <string>jj-agentic-proxy</string>
+    <string>jj-agentic-traffic</string>
     <key>CFBundleIdentifier</key>
-    <string>com.yigegongjiang.jj-agentic-proxy</string>
+    <string>com.yigegongjiang.jj-agentic-traffic</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundleIconName</key>

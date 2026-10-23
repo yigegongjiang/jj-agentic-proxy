@@ -16,7 +16,7 @@ use anyhow::{bail, Context, Result};
 use crate::store::config_dir;
 
 /// 后台模式的日志目标; 由 `start` 传给子进程。
-pub const LOG_ENV: &str = "JJ_PROXY_LOG_FILE";
+pub const LOG_ENV: &str = "JJ_TRAFFIC_LOG_FILE";
 /// pid 文件里的就绪标记。
 const READY: &str = "ready";
 /// 单个日志文件上限, 满则轮转一份 -> 磁盘占用恒定 <= 2 倍, 不随运行时长增长。
@@ -42,7 +42,7 @@ pub fn acquire() -> Result<File> {
     let mut f = open_pid(true)?;
     if fs4::FileExt::try_lock(&f).is_err() {
         bail!(
-            "已在运行{}; 先执行 `jj-agentic-proxy stop`",
+            "已在运行{}; 先执行 `jj-agentic-traffic stop`",
             pid_hint(&read_raw(&mut f))
         );
     }
@@ -287,7 +287,7 @@ mod tests {
 
     #[test]
     fn capped_log_rotates_and_keeps_one_backup() {
-        let dir = std::env::temp_dir().join(format!("jj-proxy-log-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jj-traffic-log-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("daemon.log");

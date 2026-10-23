@@ -1,12 +1,13 @@
 import AppKit
 import Foundation
 
-// 终端命令入口 ~/.local/bin/jj-agentic-proxy -> 本 bundle 内的 CLI (symlink, 不拷贝)。
+// 终端命令入口 ~/.local/bin/jj-agentic-traffic -> 本 bundle 内的 CLI (symlink, 不拷贝)。
 // app 是唯一副本: 换 app 即换 CLI, 入口自动跟随, 不存在两份二进制版本错位。
 // 打开 app 时检查一次, 没装 / 指错就弹窗装 -> 用户全程只点一下, 不需要跑任何安装脚本。
 nonisolated enum CLIInstall {
-    static let linkName = "jj-agentic-proxy"
-    static let cliName = "jj-agentic-proxy-cli"
+    static let linkName = "jj-agentic-traffic"
+    static let cliName = "jj-agentic-traffic-cli"
+    static let legacyLinkName = "jj-agentic-proxy"
 
     static var linkURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -48,6 +49,11 @@ nonisolated enum CLIInstall {
             try fm.removeItem(at: linkURL)
         }
         try fm.createSymbolicLink(at: linkURL, withDestinationURL: cli)
+        // 改名前的入口 (v0.14 及以前): 只删 symlink, 普通文件不是本 app 建的不碰
+        let legacy = linkURL.deletingLastPathComponent().appendingPathComponent(legacyLinkName)
+        if (try? fm.destinationOfSymbolicLink(atPath: legacy.path)) != nil {
+            try? fm.removeItem(at: legacy)
+        }
         stripQuarantine()
         return try probeVersion()
     }
@@ -102,13 +108,13 @@ enum CLIInstallPrompt {
 
         show(
             in: window, style: .informational, title: "安装终端命令",
-            text: "把 jj-agentic-proxy 装到 ~/.local/bin, 之后终端里可以直接敲。\napp 上的按钮就是同名子命令, 两边是同一套。"
+            text: "把 jj-agentic-traffic 装到 ~/.local/bin, 之后终端里可以直接敲。\napp 上的按钮就是同名子命令, 两边是同一套。"
         ) {
             do {
                 let version = try CLIInstall.install()
                 show(
                     in: window, style: .informational, title: "装好了 (\(version))",
-                    text: "终端里敲 jj-agentic-proxy 就能启动, --help 有全部子命令。\n提示找不到命令, 把 ~/.local/bin 加进 PATH。"
+                    text: "终端里敲 jj-agentic-traffic 就能启动, --help 有全部子命令。\n提示找不到命令, 把 ~/.local/bin 加进 PATH。"
                 )
             } catch {
                 show(

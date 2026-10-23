@@ -23,9 +23,9 @@ pub const HOST: &str = BIND_LOOPBACK;
 /// 这个值只满足客户端本地解析, 不参与任何鉴权。
 ///
 /// - 不带 `exp`: 永不过期, 客户端配一次就不用再动
-/// - payload 明文: `{"https://api.openai.com/auth":{"chatgpt_account_id":"jj-agentic-proxy"}}`
+/// - payload 明文: `{"https://api.openai.com/auth":{"chatgpt_account_id":"jj-agentic-traffic"}}`
 /// - 三段 base64 都落在标准与 url-safe 字母表的交集 (无 `+` `/` `-` `_`) -> 两种解码器都能读
-pub const CLIENT_API_KEY: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiamotYWdlbnRpYy1wcm94eSJ9fQ.jjagenticproxy";
+pub const CLIENT_API_KEY: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiamotYWdlbnRpYy10cmFmZmljIn19.jjagentictraffic";
 
 /// Web 查看器端口。刻意不进 `Surface`: 它不是协议面, 没有上游与凭证映射,
 /// 混进去会让透传 / 模型列表 / 错误信封到处长出「这个面不是代理」的分支。
@@ -334,7 +334,7 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&payload).expect("payload 应是 JSON");
         assert_eq!(
             value["https://api.openai.com/auth"]["chatgpt_account_id"],
-            "jj-agentic-proxy"
+            "jj-agentic-traffic"
         );
         assert!(value.get("exp").is_none(), "MUST NOT 带时效值");
     }

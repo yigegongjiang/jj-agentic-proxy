@@ -1,4 +1,4 @@
-# jj-agentic-proxy
+# jj-agentic-traffic
 
 把已有的 Claude Pro / ChatGPT Plus 订阅额度，接到任何支持自定义 base url 的客户端上使用，不产生 API 账单。
 
@@ -8,13 +8,13 @@
 
 ## 一、安装
 
-系统要求 macOS 13 及以上。在 [Releases](https://github.com/yigegongjiang/jj-agentic-proxy/releases/latest) 页下载与本机架构对应的 `.dmg`：
+系统要求 macOS 13 及以上。在 [Releases](https://github.com/yigegongjiang/jj-agentic-traffic/releases/latest) 页下载与本机架构对应的 `.dmg`：
 
 <!-- prettier-ignore -->
 | 机型 | 安装包 |
 | --- | --- |
-| Apple 芯片（M1 及之后） | `jj-agentic-proxy-macos-arm64.dmg` |
-| Intel | `jj-agentic-proxy-macos-x86_64.dmg` |
+| Apple 芯片（M1 及之后） | `jj-agentic-traffic-macos-arm64.dmg` |
+| Intel | `jj-agentic-traffic-macos-x86_64.dmg` |
 
 打开 dmg，将图标拖入「应用程序」，双击运行。
 
@@ -57,24 +57,24 @@
 - 顶部输入框按 path、model、状态码、入口过滤；右侧日期选择器切换到往日记录
 - 勾选 **Follow** 自动跟随最新一条
 - 选中某行后，右侧分 **Request** / **Response** 两栏展示，各带两组切换：
-  - **Client ↔ Proxy** / **Proxy ↔ Upstream**：客户端发来的原始内容，或本机实际发往上游的内容
+  - **Client ↔ Local** / **Local ↔ Upstream**：客户端发来的原始内容，或本机实际发往上游的内容
   - **核心内容** / **原始报文**：只看对话正文，或看完整报文
 - 流式响应已重新组装为完整对话，不再是分片
 
-记录按天存放于 `~/.config/jj-agentic-proxy/log/`，不会自动清理。
+记录按天存放于 `~/.config/jj-agentic-traffic/log/`，不会自动清理。
 
 ## 五、终端命令
 
 app 上的按钮与下列子命令一一对应：
 
 ```bash
-jj-agentic-proxy                # 启动（已在运行则重启）
-jj-agentic-proxy stop           # 停止
-jj-agentic-proxy status         # 运行状态、账号、套餐、固定 api key
-jj-agentic-proxy models         # 当前可用的 model
-jj-agentic-proxy logs -n 20     # 最近 20 条往返摘要
-jj-agentic-proxy login codex    # 或 login anthropic
-jj-agentic-proxy logout all     # 或 logout codex / logout anthropic
+jj-agentic-traffic                # 启动（已在运行则重启）
+jj-agentic-traffic stop           # 停止
+jj-agentic-traffic status         # 运行状态、账号、套餐、固定 api key
+jj-agentic-traffic models         # 当前可用的 model
+jj-agentic-traffic logs -n 20     # 最近 20 条往返摘要
+jj-agentic-traffic login codex    # 或 login anthropic
+jj-agentic-traffic logout all     # 或 logout codex / logout anthropic
 ```
 
 提示找不到命令时，将 `~/.local/bin` 加入 `PATH`。

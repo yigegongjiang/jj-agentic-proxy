@@ -22,8 +22,8 @@ use axum::{Json, Router};
 use serde::Serialize;
 use serde_json::{json, Value};
 
+use crate::passthrough::App;
 use crate::provider::{self, Provider, Surface};
-use crate::proxy::App;
 use crate::store::{self, now};
 use crate::{daemon, oauth, reqlog, server};
 
@@ -576,7 +576,7 @@ async fn stop() -> Response {
     });
     Json(json!({
         "ok": true,
-        "message": "已发送停止信号; 重新启动需在终端执行 `jj-agentic-proxy start`",
+        "message": "已发送停止信号; 重新启动需在终端执行 `jj-agentic-traffic start`",
     }))
     .into_response()
 }

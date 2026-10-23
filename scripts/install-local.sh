@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 本机预部署总入口: 本机架构构建 -> 装 /Applications -> 链接终端命令 ~/.local/bin/jj-agentic-proxy。
+# 本机预部署总入口: 本机架构构建 -> 装 /Applications -> 链接终端命令 ~/.local/bin/jj-agentic-traffic。
 # 只给开发/发版前自检用; 用户侧安装是「下 dmg 拖进应用程序 -> 打开 app 点『好』」, 不跑任何脚本。
 # 分发打包走 scripts/make-dist.sh。
 #
@@ -15,7 +15,7 @@ done
 
 cd "$(dirname "$0")/.."
 
-APP_NAME="jj-agentic-proxy"
+APP_NAME="jj-agentic-traffic"
 CLI_NAME="$APP_NAME-cli"
 BUNDLE="$PWD/app/build/$APP_NAME.app"
 APP_DEST="/Applications/$APP_NAME.app"

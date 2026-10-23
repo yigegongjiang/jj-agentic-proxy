@@ -1,11 +1,11 @@
-//! 本机 agentic proxy: 复用自有订阅, 以官方协议暴露 Anthropic / OpenAI Codex 端点。
+//! 本机 agentic 订阅中转: 复用自有订阅, 以官方协议暴露 Anthropic / OpenAI Codex 端点。
 
 mod auth;
 mod convert;
 mod daemon;
 mod oauth;
+mod passthrough;
 mod provider;
-mod proxy;
 mod reqlog;
 mod server;
 mod sse;
@@ -27,9 +27,9 @@ use crate::store::now;
 
 #[derive(Parser)]
 #[command(
-    name = "jj-agentic-proxy",
+    name = "jj-agentic-traffic",
     version,
-    about = "本机 agentic proxy: 复用自有订阅, 为其他 app 提供 Anthropic / OpenAI Codex 官方协议端点",
+    about = "本机 agentic 订阅中转: 复用自有订阅, 为其他 app 提供 Anthropic / OpenAI Codex 官方协议端点",
     disable_help_subcommand = true
 )]
 struct Cli {
@@ -65,6 +65,8 @@ enum Cmd {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    // 先于一切读写配置目录的子命令 (含 serve): 旧名目录里的登录态与往返记录原样接过来
+    store::migrate_legacy_dir();
     match cli.cmd.unwrap_or(Cmd::Start) {
         Cmd::Start => daemon::start(),
         Cmd::Stop => daemon::stop(),
@@ -93,11 +95,11 @@ async fn serve() -> Result<()> {
                 account = c.account.as_deref().unwrap_or("-"),
                 "凭证已加载"
             ),
-            None => tracing::warn!(provider = %p, "未登录, 执行 `jj-agentic-proxy login {p}`"),
+            None => tracing::warn!(provider = %p, "未登录, 执行 `jj-agentic-traffic login {p}`"),
         }
     }
 
-    let app = Arc::new(proxy::App {
+    let app = Arc::new(passthrough::App {
         auth,
         http,
         session_id: new_session_id(),
@@ -114,7 +116,7 @@ async fn serve() -> Result<()> {
     let mut tasks: Vec<(&'static str, tokio::task::JoinHandle<_>)> = Vec::new();
     for (s, listener) in bound {
         log_listen(s.key(), &listener);
-        let port = proxy::Port {
+        let port = passthrough::Port {
             app: app.clone(),
             surface: s,
         };
@@ -271,7 +273,7 @@ fn status() -> Result<()> {
             print_endpoints();
             println!("日志: {}", daemon::log_path().display());
         }
-        None => println!("未运行 (`jj-agentic-proxy start` 后台启动)"),
+        None => println!("未运行 (`jj-agentic-traffic start` 后台启动)"),
     }
     println!(
         "往返记录: {} (按天分文件, 不自动清理)",
@@ -304,7 +306,7 @@ fn status() -> Result<()> {
 async fn models() -> Result<()> {
     let http = http_client()?;
     let auth = AuthManager::load(http.clone())?;
-    let app = Arc::new(proxy::App {
+    let app = Arc::new(passthrough::App {
         auth,
         http,
         session_id: new_session_id(),
@@ -319,7 +321,7 @@ async fn models() -> Result<()> {
             .join(" / ");
         println!("{p} (端口 {ports})");
         if app.auth.snapshot(p).await.is_none() {
-            println!("  未登录 (`jj-agentic-proxy login {p}`)");
+            println!("  未登录 (`jj-agentic-traffic login {p}`)");
             continue;
         }
         let list = server::list(&app, p).await;

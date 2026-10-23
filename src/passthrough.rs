@@ -1402,7 +1402,8 @@ mod tests {
 
     /// 带一份未过期凭证的 App (凭证落在临时目录, 不碰本机真实 auth.json)。
     async fn test_app(tag: &str) -> (App, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!("jj-proxy-test-{tag}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("jj-traffic-test-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         *crate::store::TEST_CONFIG_DIR.lock().unwrap() = Some(dir.clone());
         let cred = crate::store::Credential {
