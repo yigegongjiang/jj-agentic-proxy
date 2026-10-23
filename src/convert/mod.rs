@@ -50,10 +50,29 @@ fn translator(p: Provider) -> Box<dyn Translate> {
     }
 }
 
-/// 取模型名: provider 已由端口定死, 只需剥掉 `anthropic/xxx` 这类前缀 (部分客户端会带)。
+/// 取模型名: 剥掉 `anthropic/xxx` 这类前缀 (部分客户端会带)。
 pub fn model_name(model: &str) -> Option<&str> {
     let name = model.rsplit('/').next().unwrap_or(model).trim();
     (!name.is_empty()).then_some(name)
+}
+
+/// model 归哪家订阅: 厂商前缀 (`anthropic/` `openai/` ...) 优先, 否则 `claude` 开头 = Anthropic, 其余 = Codex。
+///
+/// 按家族名而非模型名单判断: Anthropic 历来所有模型 id 都以 `claude` 开头, 新模型不会让它过期;
+/// Codex 清单 (gpt-* 等) 从不以 `claude` 开头 -> 两边不撞。
+pub fn model_provider(model: &str) -> Provider {
+    if let Some(p) = model
+        .split_once('/')
+        .and_then(|(vendor, _)| Provider::parse(vendor.trim()))
+    {
+        return p;
+    }
+    let name = model_name(model).unwrap_or_default();
+    if name.to_ascii_lowercase().starts_with("claude") {
+        Provider::Anthropic
+    } else {
+        Provider::Codex
+    }
 }
 
 /// 组装上游请求体 (已含 stream=true 等硬要求)。
@@ -476,6 +495,21 @@ mod tests {
         assert_eq!(model_name("openai/gpt-5.5"), Some("gpt-5.5"));
         assert_eq!(model_name(" gpt-5.6-sol "), Some("gpt-5.6-sol"));
         assert!(model_name("  ").is_none());
+    }
+
+    #[test]
+    fn model_provider_by_vendor_prefix_then_family() {
+        assert_eq!(model_provider("claude-opus-5"), Provider::Anthropic);
+        assert_eq!(model_provider("Claude-Sonnet-5"), Provider::Anthropic);
+        assert_eq!(
+            model_provider("anthropic/claude-sonnet-5"),
+            Provider::Anthropic
+        );
+        assert_eq!(model_provider("gpt-6-sol"), Provider::Codex);
+        assert_eq!(model_provider("openai/gpt-5.5"), Provider::Codex);
+        // 显式厂商前缀压过家族名
+        assert_eq!(model_provider("openai/claude-x"), Provider::Codex);
+        assert_eq!(model_provider("anthropic/foo"), Provider::Anthropic);
     }
 
     #[test]

@@ -100,7 +100,6 @@ struct EndpointOut {
 #[derive(Serialize)]
 struct CredOut {
     provider: String,
-    ports: String,
     logged_in: bool,
     account: Option<String>,
     plan: Option<String>,
@@ -125,31 +124,21 @@ async fn status() -> Response {
     };
     let creds = Provider::ALL
         .iter()
-        .map(|p| {
-            let ports = Surface::ALL
-                .iter()
-                .filter(|s| s.provider() == *p)
-                .map(|s| s.port().to_string())
-                .collect::<Vec<_>>()
-                .join(" / ");
-            match store.get(p.key()) {
-                None => CredOut {
-                    provider: p.key().to_string(),
-                    ports,
-                    logged_in: false,
-                    account: None,
-                    plan: None,
-                    expires_in: 0,
-                },
-                Some(c) => CredOut {
-                    provider: p.key().to_string(),
-                    ports,
-                    logged_in: true,
-                    account: c.account.clone(),
-                    plan: c.plan.clone(),
-                    expires_in: c.expires_at.saturating_sub(now()),
-                },
-            }
+        .map(|p| match store.get(p.key()) {
+            None => CredOut {
+                provider: p.key().to_string(),
+                logged_in: false,
+                account: None,
+                plan: None,
+                expires_in: 0,
+            },
+            Some(c) => CredOut {
+                provider: p.key().to_string(),
+                logged_in: true,
+                account: c.account.clone(),
+                plan: c.plan.clone(),
+                expires_in: c.expires_at.saturating_sub(now()),
+            },
         })
         .collect();
     Json(StatusOut {
@@ -424,15 +413,9 @@ fn read_line_at(path: &std::path::Path, offset: u64, length: usize) -> Option<Ve
 async fn models(State(ui): Ctx) -> Response {
     let mut out = Vec::new();
     for p in Provider::ALL {
-        let ports = Surface::ALL
-            .iter()
-            .filter(|s| s.provider() == p)
-            .map(|s| s.port().to_string())
-            .collect::<Vec<_>>()
-            .join(" / ");
         if ui.app.auth.snapshot(p).await.is_none() {
             out.push(json!({
-                "provider": p.key(), "ports": ports, "logged_in": false, "models": [],
+                "provider": p.key(), "logged_in": false, "models": [],
             }));
             continue;
         }
@@ -441,7 +424,7 @@ async fn models(State(ui): Ctx) -> Response {
         let mut names: Vec<&str> = list.iter().filter_map(|m| m["id"].as_str()).collect();
         names.sort_by(|a, b| crate::natural_cmp(a, b));
         out.push(json!({
-            "provider": p.key(), "ports": ports, "logged_in": true, "models": names,
+            "provider": p.key(), "logged_in": true, "models": names,
         }));
     }
     Json(json!({ "providers": out })).into_response()

@@ -1,4 +1,4 @@
-//! 端口层: 一个端口一个 provider, 业务按官方 api key 方式调用 -> 本机换成 CLI (OAuth) 渠道。
+//! 端口层: 每个端口都接全部协议, 按 path + model 分流到 provider; 业务按官方 api key 方式调用 -> 本机换成 CLI (OAuth) 渠道。
 //!
 //! 客户端全程以为自己在直连官方付费 api, 因此:
 //! - 两家 base url 约定 (域名根 / `.../v1`) 都要通 -> 路径先归一
@@ -38,16 +38,31 @@ fn is_websocket_upgrade(h: &HeaderMap) -> bool {
         .is_some_and(|v| v.eq_ignore_ascii_case("websocket"))
 }
 
+/// 只取 `model`: 分流要在记录与转换之前定好协议面。
+#[derive(serde::Deserialize)]
+struct ModelField {
+    model: Option<String>,
+}
+
 /// 唯一入口 -> 往返记录只需挂在这里, 所有端口 / 路径 / 错误一并覆盖。
 async fn dispatch(
-    state: State<Port>,
+    State(arrival): State<Port>,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    let model = (passthrough::strip_v1(uri.path()) == "/chat/completions")
+        .then(|| serde_json::from_slice::<ModelField>(&body).ok()?.model)
+        .flatten();
+    let surface = passthrough::surface_for(arrival.surface, uri.path(), &headers, model.as_deref());
+    // 记录里的 surface = 实际协议面 -> 查看器按它过滤, 与从哪个端口进来无关
+    let state = State(Port {
+        app: arrival.app,
+        surface,
+    });
     let path = uri.path_and_query().map_or(uri.path(), |p| p.as_str());
-    let rec = reqlog::start(state.surface, &method, path, &headers, &body);
+    let rec = reqlog::start(surface, &method, path, &headers, &body);
     // scoped: 处理过程中打上游时顺带把那一腿 (注入后的 header / 改写后的 body) 记下来
     let (resp, leg) = reqlog::scoped(route(state, method, uri, headers, body)).await;
     match rec {
@@ -97,7 +112,7 @@ async fn route(
 
 // ---------- Chat Completions ----------
 
-/// provider 由端口定, model 只取名字 (允许 `openai/`、`anthropic/` 前缀)。
+/// provider 已由 `surface_for` 按 model 定好, 这里 model 只取名字 (允许 `openai/`、`anthropic/` 前缀)。
 async fn chat_completions(State(port): State<Port>, body: Bytes) -> Response {
     let p = port.provider();
     let bad = |msg: &str| Dialect::OpenAI.error(StatusCode::BAD_REQUEST, "invalid_request", msg);
@@ -173,16 +188,38 @@ async fn chat_completions(State(port): State<Port>, body: Bytes) -> Response {
 
 // ---------- 模型列表 (OpenAI 方言) ----------
 
+/// 两家订阅合并成一张表 (任一端口选到任一 model 都能用); 未登录的那家为空。
+/// 到达端口所属那家排前面: 客户端常取首项当默认 model, 老配置的默认不变。
 async fn openai_models(State(port): State<Port>) -> Response {
-    let data = list(&port.app, port.provider()).await;
+    let home = port.provider();
+    let other = Provider::ALL
+        .into_iter()
+        .find(|&p| p != home)
+        .unwrap_or(home);
+    let (mut data, rest) = tokio::join!(list(&port.app, home), extra_list(&port.app, other));
+    data.extend(rest);
     json_body(StatusCode::OK, json!({ "object": "list", "data": data }))
+}
+
+/// 另一家的列表尽力而为: 未登录不发请求, 上游卡住最多等 5s ->
+/// 一家故障 (重试 + 300s 读超时) 不拖住只用另一家的老客户端。
+async fn extra_list(app: &Arc<App>, p: Provider) -> Vec<Value> {
+    if app.auth.snapshot(p).await.is_none() {
+        return Vec::new();
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(5), list(app, p))
+        .await
+        .unwrap_or_else(|_| {
+            tracing::warn!(provider = %p, "模型列表超时, 本次只列到达端口那家");
+            Vec::new()
+        })
 }
 
 async fn openai_model(State(port): State<Port>, id: &str) -> Response {
     let Some(name) = convert::model_name(id) else {
         return Dialect::OpenAI.error(StatusCode::NOT_FOUND, "not_found", "model 不存在");
     };
-    match list(&port.app, port.provider())
+    match list(&port.app, convert::model_provider(id))
         .await
         .into_iter()
         .find(|m| m["id"] == name)
@@ -191,7 +228,7 @@ async fn openai_model(State(port): State<Port>, id: &str) -> Response {
         None => Dialect::OpenAI.error(
             StatusCode::NOT_FOUND,
             "not_found",
-            &format!("model `{id}` 不在 {} 端口的可用列表中", port.surface),
+            &format!("model `{id}` 不在可用列表中; 见 GET /v1/models"),
         ),
     }
 }

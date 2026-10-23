@@ -33,22 +33,14 @@
 
 ## 三、客户端配置
 
-<!-- prettier-ignore -->
-| surface | base port |
-| --- | --- |
-| openai | `http://127.0.0.1:10010` |
-| openai-codex | `http://127.0.0.1:10010/backend-api/codex` |
-| anthropic | `http://127.0.0.1:10011` |
-| anthropic-openai | `http://127.0.0.1:10012` |
+所有客户端填同一个 base url：**`http://127.0.0.1:10010`**
 
 - **api key**：不填 / 填任意内容。
-- **model**：可用取值见 **Console… → Models**
+- **model**：可用取值见 **Console… → Models**。`claude-*` 走 Claude Pro 订阅，其余走 ChatGPT Plus 订阅
+- 接口类型不限：OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 均由该地址提供
 - base url 结尾的 `/v1` 加与不加均可
-- 认 OpenAI 接口、想走 Codex 订阅通道，走 `openai`
-- 认 Codex 订阅，走 `openai-codex`
-- 认 OpenAI 接口、想走 Claude-Code 订阅通道，走 `anthropic-openai`
-- 认 Anthropic 接口、想走 Claude-Code 订阅通道，走 `anthropic`
-- 对于 `openai-codex` 通道，外部平台会自行拼接 url path，可按需填入 `xxx:10010、xxx:10010/backend-api、xxx:10010/backend-api/codex` 进行验证哪一个可用。
+- 客户端只接受 Codex 订阅地址时，填 `http://127.0.0.1:10010/backend-api/codex`。部分平台会自行拼接 url path，可依次尝试 `xxx:10010`、`xxx:10010/backend-api`、`xxx:10010/backend-api/codex`
+- 旧版本使用的 `10011`、`10012` 端口继续可用，已有配置无需修改
 
 ## 四、查看请求往返
 

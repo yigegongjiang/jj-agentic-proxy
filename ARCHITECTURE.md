@@ -12,31 +12,38 @@ MUST NOT 写安装 · 上手 (→ README.md) / 发布流程 (→ workflow.md) / 
 
 ## 端点
 
-<!-- prettier-ignore -->
-| 端点 | 端口 | 上游 | 协议 |
-| --- | --- | --- | --- |
-| `POST /v1/chat/completions` | 全部 | 按端口定 | OpenAI Chat Completions |
-| `GET /v1/models`, `/v1/models/{id}` | 全部 | 按端口定 | OpenAI 列表 (仅本端口订阅) |
-| `POST /v1/messages` | 10011 | `api.anthropic.com/v1/messages` | Anthropic Messages |
-| `POST /v1/messages/count_tokens` | 10011 | `api.anthropic.com` 同路径 | Anthropic Messages |
-| `POST /v1/responses` | 10010 | `chatgpt.com/backend-api/codex/responses` | OpenAI Responses |
-| `POST /v1/responses/*` | 10010 | 上游 `/responses` 同子路径 (含 `/compact`) | OpenAI Responses |
-| `ANY /backend-api/codex/*` | 10010 | `chatgpt.com/backend-api/codex` 同路径 | 上游替身入口 ([透传口](#codex-透传口)) |
-| `POST /v1/complete` | 10011 | `api.anthropic.com/v1/complete` | Anthropic legacy Text Completions |
-| `GET /health` | 全部 | — | 本端口协议面 + 登录状态 + 可用路径 |
+三个端口 (10010 / 10011 / 10012) 路径集相同, 对外只宣传 10010; 每个请求先由 `passthrough::surface_for` 定协议面 (Surface: codex / claude-code / claude-openai), 后续处理只看协议面.
 
-- 端口层只截 Chat Completions 与模型列表, 其余路径一律落原生透传 (`passthrough::resolve`): 按端口前缀白名单放行 -> 上游同路径, body 不改协议只换身份
-  - 10011: `/messages` / `/models` / `/complete` 及其子路径 -> `api.anthropic.com/v1{path}`
-  - 10010: `/responses` 及其子路径 + `/backend-api/codex/*` -> `chatgpt.com/backend-api/codex{...}`
-  - 10012: 只有 `/chat/completions` (交给上游官方兼容层), 别的一概 404
-  - 不在白名单的路径不猜: 404 里列出本端口可用路径 (`passthrough::endpoints`, 与 `/health` 同一份)
-  - `endpoints` 列表未含 `/v1/complete`, 而 `resolve` 白名单含 -> 该路径实际转发但不出现在 404 提示与 `/health` 里 (代码不一致, 未改行为)
-- Chat Completions 的上游由端口决定, `model` 只取模型名 (允许 `anthropic/`、`openai/` 前缀)
-- 10010 / 10011 本地转换覆盖: 流式 / 非流式、tools + 工具结果回传、图片 (url 与 data URI)、`response_format`、`reasoning_effort`; 思考内容出 `reasoning_content`
-- 采样参数 (`temperature` / `top_p` / `top_k`) 在所有 Anthropic 面 (10011 原生 + 10011/10012 Chat Completions) 一律丢弃: 上游新模型按「键是否存在」硬拒 (400 `` `temperature` is deprecated ``), 与取值无关, 且受限名单随新模型扩张 -> 不做模型名判断
-- 10011 的 Chat Completions 把 `reasoning_effort` 映射成上游现行思考档位
-- 10012 只有 Chat Completions 与模型列表 (原生 Messages 走 10011), 字段支持度以[上游兼容层](https://platform.claude.com/docs/en/api/openai-sdk)为准: 无 `reasoning_content`, `response_format` / `reasoning_effort` / `seed` 等被上游静默忽略
-- `/v1/models` 只在 10011 且请求带 `x-api-key` / `anthropic-version` 时给 Anthropic 官方原样, 其余一律 OpenAI 列表; Codex 上游标 `visibility: hide` 的内部模型不列
+<!-- prettier-ignore -->
+| 端点 | 协议面 | 上游 | 协议 |
+| --- | --- | --- | --- |
+| `POST /v1/chat/completions` | 按 model | 按 model 定 | OpenAI Chat Completions |
+| `GET /v1/models`, `/v1/models/{id}` | — | 两家合并 | OpenAI 列表 |
+| `POST /v1/messages` | claude-code | `api.anthropic.com/v1/messages` | Anthropic Messages |
+| `POST /v1/messages/count_tokens` | claude-code | `api.anthropic.com` 同路径 | Anthropic Messages |
+| `POST /v1/responses` | codex | `chatgpt.com/backend-api/codex/responses` | OpenAI Responses |
+| `POST /v1/responses/*` | codex | 上游 `/responses` 同子路径 (含 `/compact`) | OpenAI Responses |
+| `ANY /backend-api/codex/*` | codex | `chatgpt.com/backend-api/codex` 同路径 | 上游替身入口 ([透传口](#codex-透传口)) |
+| `POST /v1/complete` | claude-code | `api.anthropic.com/v1/complete` | Anthropic legacy Text Completions |
+| `GET /health` | — | — | 到达端口 + 两家登录状态 + 可用路径 |
+
+- 分流 (`surface_for`): 协议独有路径直接定面; `/chat/completions` 按 model (`convert::model_provider`); Anthropic 方言 (`x-api-key` / `anthropic-version` / `anthropic-beta`) 的 `/models` -> claude-code 原生透传; 其余 (OpenAI 模型列表 / `/health` / 未知路径 / 缺 model) 留在到达端口的面
+- model -> 订阅: 厂商前缀 (`anthropic/` `openai/` 等, `Provider::parse`) 优先, 否则 `claude` 开头 = Anthropic, 其余 = Codex. 按家族名判断 (Anthropic 历来 id 全以 `claude` 开头, Codex 清单从不), 不随新模型过期; MUST NOT 改成按模型名单匹配
+- Anthropic model 的 Chat Completions: 到达 10012 -> claude-openai (官方兼容层, 旧配置行为不变); 到达 10010 / 10011 -> claude-code 本地转换 (字段覆盖更全)
+- OpenAI 模型列表合并两家, 到达端口所属那家排前 (客户端常取首项当默认, 旧配置默认 model 不变); 未登录的那家为空
+  - 另一家尽力而为: 未登录不发请求 + 5s 超时即空 -> 一家上游故障 (重试 + 300s 读超时) 不拖住只用另一家的旧配置客户端
+- 端口层只截 Chat Completions 与模型列表, 其余路径一律落原生透传 (`passthrough::resolve`): 按协议面前缀白名单放行 -> 上游同路径, body 不改协议只换身份
+  - claude-code: `/messages` / `/models` / `/complete` 及其子路径 -> `api.anthropic.com/v1{path}`
+  - codex: `/responses` 及其子路径 + `/backend-api/codex/*` -> `chatgpt.com/backend-api/codex{...}`
+  - claude-openai: 只有 `/chat/completions` (交给上游官方兼容层)
+  - 不在白名单的路径不猜: 404 里列出可用路径 (`passthrough::ENDPOINTS`, 与 `/health` 同一份)
+  - `ENDPOINTS` 未含 `/v1/complete`, 而 `resolve` 白名单含 -> 该路径实际转发但不出现在 404 提示与 `/health` 里 (代码不一致, 未改行为)
+- Chat Completions `model` 只取模型名 (允许 `anthropic/`、`openai/` 前缀)
+- codex / claude-code 面本地转换覆盖: 流式 / 非流式、tools + 工具结果回传、图片 (url 与 data URI)、`response_format`、`reasoning_effort`; 思考内容出 `reasoning_content`
+- 采样参数 (`temperature` / `top_p` / `top_k`) 在所有 Anthropic 面 (claude-code 原生 + claude-code / claude-openai Chat Completions) 一律丢弃: 上游新模型按「键是否存在」硬拒 (400 `` `temperature` is deprecated ``), 与取值无关, 且受限名单随新模型扩张 -> 不做模型名判断
+- claude-code 面的 Chat Completions 把 `reasoning_effort` 映射成上游现行思考档位
+- claude-openai 面只有 Chat Completions (原生 Messages 走 claude-code), 字段支持度以[上游兼容层](https://platform.claude.com/docs/en/api/openai-sdk)为准: 无 `reasoning_content`, `response_format` / `reasoning_effort` / `seed` 等被上游静默忽略
+- `/v1/models` 带 Anthropic 方言头时给 Anthropic 官方原样 (任一端口), 其余一律 OpenAI 列表; Codex 上游标 `visibility: hide` 的内部模型不列
 - 错误一律按方言裹官方信封 (`{"type":"error",...}` / `{"error":{...}}`); 上游已给官方形状则原样透传, 保留 `request-id` 等头
 
 ## Codex 透传口
@@ -48,20 +55,20 @@ curl http://127.0.0.1:10010/backend-api/codex/usage  # 订阅额度: plan_type +
 ```
 
 - 替身入口不等于零改写: `resolve` 把 `/backend-api/codex` 之后的部分当 `upstream_path` -> `/backend-api/codex/responses` 与 `/v1/responses` 拿到同一个 `upstream_path == "/responses"`, 走同一份 `normalize_codex` + 强制 SSE + 非流式聚合 (完全等价的两个入口, 非两条链路); 只有 `/responses` 之外的子路径 (`/usage` 等) 才是 body 原样出去
-- 零改写不止这个口: body 改写按 `upstream_path` 精确门控 (`/v1/messages*` 注 CLI 前缀 + 丢采样参数; 10012 hoist system; Codex 仅 `upstream_path == "/responses"` 才 normalize), 所以 `/responses/compact`、`/v1/complete` 也是 body 原样出去 —— `/v1/complete` 连 Claude Code system 前缀都不注入 (上游是否受理未实测)
+- 零改写不止这个口: body 改写按 `upstream_path` 精确门控 (`/v1/messages*` 注 CLI 前缀 + 丢采样参数; claude-openai hoist system; Codex 仅 `upstream_path == "/responses"` 才 normalize), 所以 `/responses/compact`、`/v1/complete` 也是 body 原样出去 —— `/v1/complete` 连 Claude Code system 前缀都不注入 (上游是否受理未实测)
 - 与其余端点同规: 吃 `/v1` 前缀 (base url 按 OpenAI SDK 约定写成 `.../v1` 时拼出的 `/v1/backend-api/codex/*` 同样命中) + 不需要 api key (代理不校验客户端凭证, 上游身份一律用本机 OAuth)
 - 已验证的子路径只有 `/usage`; `/responses`、`/models` 走上表正式端点即可 (带本地转换 + 方言归一)
 - 上游是 Codex CLI 私有后端, 无公开文档: 路径与响应形状随时可能变, 本口只保证转发, 不保证上游长期可用
 
 ## 往返记录
 
-经三端口的每次 req/res 落 `~/.config/jj-agentic-traffic/log/<日期>.jsonl`, 一行一次往返 (JSON Lines, `rg` / `jq` 直接可读), **两条腿都记**: 客户端 <-> 代理, 代理 <-> 上游.
+经代理端口的每次 req/res 落 `~/.config/jj-agentic-traffic/log/<日期>.jsonl`, 一行一次往返 (JSON Lines, `rg` / `jq` 直接可读), **两条腿都记**: 客户端 <-> 代理, 代理 <-> 上游.
 
 <!-- prettier-ignore -->
 | 字段 | 说明 |
 | --- | --- |
 | `ts` | 记录时刻, 固定 JST (`+09:00`); 文件名取同一日期 |
-| `surface` / `method` / `path` | 哪个端口 + 客户端请求行 (`path` 含 query) |
+| `surface` / `method` / `path` | 分流后的协议面 (非到达端口; 0.16.0 之前 = 端口) + 客户端请求行 (`path` 含 query) |
 | `status` | 客户端拿到的状态码; `0` = 没等到响应 |
 | `stream` / `elapsed_ms` | 客户端是否要流式 + 从收到请求到响应结束的耗时 |
 | `req_bytes` / `res_bytes` / `model` | 两侧 body 字节数 + 请求里的 model |

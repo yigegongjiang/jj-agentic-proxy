@@ -221,21 +221,29 @@ async fn bind(port: u16) -> Result<tokio::net::TcpListener> {
         })
 }
 
-/// 三个协议面 + 查看器的 base url (start / status 共用)。
+/// base url + 查看器 (start / status 共用)。
 pub(crate) fn print_endpoints() {
-    // 用 key() 而非 Display: 宽度说明符对自定义 Display 不生效, 会排不齐。
-    for s in Surface::ALL {
-        println!("- {:<13} http://{}:{}", s.key(), provider::HOST, s.port());
-        // 逃生口只在 codex 面存在, 且不出现在任何客户端配置里 -> 不在这里提就没人知道。
-        // 中文宽度说明符会排不齐 -> 走两空格缩进, 不对列。
-        if s == Surface::Codex {
-            println!(
-                "  透传口: http://{}:{}/backend-api/codex/* (打上游私有端点, 如 /usage 查额度)",
-                provider::HOST,
-                s.port()
-            );
-        }
-    }
+    // 每个端口都接全部协议 -> 只报一个 base url, 其余端口只为旧配置保留。
+    let [base, legacy @ ..] = Surface::ALL;
+    let legacy = legacy
+        .iter()
+        .map(|s| s.port().to_string())
+        .collect::<Vec<_>>()
+        .join(" / ");
+    println!(
+        "- {:<13} http://{}:{} (OpenAI / Anthropic / Codex 协议都接, 按 model 分流)",
+        "base url",
+        provider::HOST,
+        base.port()
+    );
+    // 逃生口不出现在任何客户端配置里 -> 不在这里提就没人知道。
+    // 中文宽度说明符会排不齐 -> 走两空格缩进, 不对列。
+    println!(
+        "  透传口: http://{}:{}/backend-api/codex/* (打上游私有端点, 如 /usage 查额度)",
+        provider::HOST,
+        base.port()
+    );
+    println!("  旧端口 {legacy} 继续可用, 已有配置不用改");
     println!(
         "- {UI_LABEL:<13} http://{}:{} (浏览器打开看往返记录)",
         provider::HOST,
@@ -320,13 +328,7 @@ async fn models() -> Result<()> {
     });
     server::learn_codex_latest(&app).await;
     for p in Provider::ALL {
-        let ports = Surface::ALL
-            .iter()
-            .filter(|s| s.provider() == p)
-            .map(|s| s.port().to_string())
-            .collect::<Vec<_>>()
-            .join(" / ");
-        println!("{p} (端口 {ports})");
+        println!("{p}");
         if app.auth.snapshot(p).await.is_none() {
             println!("  未登录 (`jj-agentic-traffic login {p}`)");
             continue;

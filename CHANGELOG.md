@@ -14,6 +14,14 @@
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-10-23
+
+### Changed
+
+- 客户端只需填一个地址 `http://127.0.0.1:10010`: OpenAI / Anthropic / Codex 接口都在这里, 按 model 自动走 Claude Pro 或 ChatGPT Plus 订阅
+- 模型列表合并两家订阅, 选哪个 model 都能直接用
+- 旧端口 10011 / 10012 继续可用, 已有配置无需修改
+
 ## [0.15.1] - 2026-10-23
 
 ### Fixed

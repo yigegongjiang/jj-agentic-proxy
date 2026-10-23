@@ -1,4 +1,4 @@
-//! 透传层: provider 由端口固定 -> 按 path 定上游 -> 注入官方 CLI 凭证与 header -> 流式回传。
+//! 透传层: 协议面由 path + model 定 (`surface_for`) -> 按 path 定上游 -> 注入官方 CLI 凭证与 header -> 流式回传。
 //!
 //! 只做官方协议要求的最小改写: 客户端看到的行为必须与官方 api key 服务一致。
 
@@ -28,7 +28,7 @@ pub struct App {
     pub session_id: String,
 }
 
-/// 一个端口 = 一个协议面: 请求打到哪个端口就决定走哪家上游、说哪套协议。
+/// 一次请求的处理上下文: 监听时 `surface` = 到达端口, 分流后 = 实际协议面 (`surface_for`)。
 #[derive(Clone)]
 pub struct Port {
     pub app: Arc<App>,
@@ -41,26 +41,55 @@ impl Port {
     }
 }
 
-/// 该端口对外可用路径 (404 提示与 /health 共用一份)。
-pub(crate) fn endpoints(surface: Surface) -> &'static [&'static str] {
-    match surface {
-        Surface::ClaudeCode => &[
-            "/v1/messages",
-            "/v1/messages/count_tokens",
-            "/v1/models",
-            "/v1/chat/completions",
-            "/health",
-        ],
-        Surface::ClaudeOpenAI => &["/v1/chat/completions", "/v1/models", "/health"],
-        Surface::Codex => &[
-            "/v1/responses",
-            "/v1/responses/compact",
-            "/v1/models",
-            "/v1/chat/completions",
-            "/backend-api/codex/*",
-            "/health",
-        ],
+/// 对外可用路径, 每个端口都一样 (404 提示与 /health 共用一份)。
+pub(crate) const ENDPOINTS: [&str; 8] = [
+    "/v1/chat/completions",
+    "/v1/models",
+    "/v1/messages",
+    "/v1/messages/count_tokens",
+    "/v1/responses",
+    "/v1/responses/compact",
+    "/backend-api/codex/*",
+    "/health",
+];
+
+/// 请求实际走哪个协议面: 每个端口都接全部路径, 客户端只需记一个 base url。
+///
+/// - 协议独有路径直接定面: `/messages` `/complete` -> Anthropic 原生; `/responses` `/backend-api/codex` -> Codex
+/// - `/chat/completions` 按 model 定上游 (`convert::model_provider`); Anthropic 在 10012 上仍走官方兼容层
+///   (老配置行为不变), 其余端口走本地转换
+/// - Anthropic 方言的 `/models` 落 Anthropic 原生透传 (官方原样形状)
+/// - 其余 (OpenAI 模型列表 / `/health` / 未知路径 / 缺 model) 留在到达端口
+pub(crate) fn surface_for(
+    arrival: Surface,
+    path: &str,
+    headers: &HeaderMap,
+    model: Option<&str>,
+) -> Surface {
+    let p = strip_v1(path);
+    if ["/messages", "/complete"]
+        .iter()
+        .any(|pre| sub_path(p, pre).is_some())
+    {
+        return Surface::ClaudeCode;
     }
+    if sub_path(p, "/responses").is_some() || sub_path(p, "/backend-api/codex").is_some() {
+        return Surface::Codex;
+    }
+    if p == "/chat/completions" {
+        return match model.map(convert::model_provider) {
+            Some(Provider::Codex) => Surface::Codex,
+            Some(Provider::Anthropic) if arrival == Surface::ClaudeOpenAI => Surface::ClaudeOpenAI,
+            Some(Provider::Anthropic) => Surface::ClaudeCode,
+            None => arrival,
+        };
+    }
+    if sub_path(p, "/models").is_some()
+        && Dialect::of(Surface::ClaudeCode, headers) == Dialect::Anthropic
+    {
+        return Surface::ClaudeCode;
+    }
+    arrival
 }
 
 /// 浏览器里的本地页面也要能直连 -> 全放开; 预检由该层直接应答, 不打到上游。
@@ -75,27 +104,27 @@ pub(crate) fn cors() -> tower_http::cors::CorsLayer {
 }
 
 pub(crate) async fn health(State(port): State<Port>) -> Response {
-    let s = port.surface;
-    let p = port.provider();
-    let login = match port.app.auth.snapshot(p).await {
-        Some(c) => json!({
-            "logged_in": true,
-            "account": c.account,
-            "plan": c.plan,
-            "expires_at": c.expires_at,
-        }),
-        None => json!({ "logged_in": false }),
-    };
+    let mut auth = Map::new();
+    for p in Provider::ALL {
+        let login = match port.app.auth.snapshot(p).await {
+            Some(c) => json!({
+                "logged_in": true,
+                "account": c.account,
+                "plan": c.plan,
+                "expires_at": c.expires_at,
+            }),
+            None => json!({ "logged_in": false }),
+        };
+        auth.insert(p.key().into(), login);
+    }
     json_body(
         StatusCode::OK,
         json!({
             "name": env!("CARGO_PKG_NAME"),
             "version": env!("CARGO_PKG_VERSION"),
-            "surface": s.key(),
-            "provider": p.key(),
-            "port": s.port(),
-            "auth": login,
-            "endpoints": endpoints(s),
+            "port": port.surface.port(),
+            "auth": auth,
+            "endpoints": ENDPOINTS,
         }),
     )
 }
@@ -112,7 +141,7 @@ pub(crate) enum Dialect {
 impl Dialect {
     /// Anthropic 官方 SDK 一定带 `x-api-key` 或 `anthropic-version`; OpenAI 侧只有 Bearer。
     ///
-    /// 纯 OpenAI 形状的端口不随客户端头摇摆: 该端口的存在意义就是只讲 OpenAI 方言。
+    /// 纯 OpenAI 形状的协议面不随客户端头摇摆: 该面只讲 OpenAI 方言。
     pub(crate) fn of(surface: Surface, h: &HeaderMap) -> Self {
         if surface != Surface::ClaudeCode {
             return Dialect::OpenAI;
@@ -168,11 +197,7 @@ pub(crate) async fn handle(
     let path = uri.path().to_string();
     let dialect = Dialect::of(port.surface, &headers);
     let Some(target) = resolve(port.surface, &path, uri.query()) else {
-        return dialect.error(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            &not_found_hint(port.surface, &path),
-        );
+        return dialect.error(StatusCode::NOT_FOUND, "not_found", &not_found_hint(&path));
     };
 
     let body = match decode_request_body(&headers, body) {
@@ -397,20 +422,9 @@ struct Target {
     upstream_path: String,
 }
 
-/// 走错端口是端口拆分后最常见的误用 -> 直接给出正确端口, 不让客户端猜。
-fn not_found_hint(surface: Surface, path: &str) -> String {
-    let other = Surface::ALL
-        .into_iter()
-        .find(|&s| s != surface && resolve(s, path, None).is_some());
-    match other {
-        // 只给端口不给 host: 客户端填的可能是 localhost 而非 127.0.0.1, 端口才是要改的部分。
-        Some(s) => format!("路径 {path} 属于 {s}, 请改用端口 {}", s.port()),
-        None => format!(
-            "未支持的路径 {path}; {surface} 端口 ({}) 可用: {}",
-            surface.port(),
-            endpoints(surface).join(", ")
-        ),
-    }
+/// 每个端口路径集相同 -> 不存在「走错端口」, 只列可用路径。
+fn not_found_hint(path: &str) -> String {
+    format!("未支持的路径 {path}; 可用: {}", ENDPOINTS.join(", "))
 }
 
 /// 官方两家 base url 约定不同: Anthropic 到域名根 (SDK 自己拼 `/v1`), OpenAI 到 `/v1`。
@@ -431,7 +445,7 @@ pub(crate) fn strip_v1(path: &str) -> &str {
     }
 }
 
-/// 上游由端口固定; path 只决定上游子路径, 不属于该端口的路径直接拒绝。
+/// 上游由协议面固定; path 只决定上游子路径, 不属于该面的路径直接拒绝。
 fn resolve(surface: Surface, path: &str, query: Option<&str>) -> Option<Target> {
     let p = strip_v1(path);
     let (base, upstream_path) = match surface {
@@ -996,8 +1010,8 @@ mod tests {
     }
 
     #[test]
-    fn each_port_only_serves_its_own_surface() {
-        // 一个端口 = 一个协议面: 别家的路径在本端口不存在
+    fn each_surface_only_resolves_its_own_paths() {
+        // 协议面已由 surface_for 定好: 别家的路径在本面不存在
         assert!(resolve(Surface::ClaudeCode, "/v1/responses", None).is_none());
         assert!(resolve(Surface::Codex, "/v1/messages", None).is_none());
         assert!(resolve(Surface::ClaudeCode, "/backend-api/codex/usage", None).is_none());
@@ -1007,21 +1021,61 @@ mod tests {
     }
 
     #[test]
-    fn wrong_port_hint_points_at_the_right_one() {
-        let hint = not_found_hint(Surface::ClaudeCode, "/v1/responses");
-        assert!(hint.contains("codex"), "{hint}");
-        assert!(hint.contains("10010"), "{hint}");
+    fn any_port_routes_by_path_then_model() {
+        let none = HeaderMap::new();
+        for arrival in Surface::ALL {
+            let on = |path, model| surface_for(arrival, path, &none, model);
+            assert_eq!(on("/v1/messages", None), Surface::ClaudeCode);
+            assert_eq!(on("/messages/count_tokens", None), Surface::ClaudeCode);
+            assert_eq!(on("/v1/complete", None), Surface::ClaudeCode);
+            assert_eq!(on("/v1/responses", None), Surface::Codex);
+            assert_eq!(on("/v1/responses/compact", None), Surface::Codex);
+            assert_eq!(on("/v1/backend-api/codex/usage", None), Surface::Codex);
+            assert_eq!(
+                on("/v1/chat/completions", Some("gpt-6-sol")),
+                Surface::Codex
+            );
+            // OpenAI 模型列表 / 缺 model / 未知路径留在到达端口
+            assert_eq!(on("/v1/models", None), arrival);
+            assert_eq!(on("/v1/chat/completions", None), arrival);
+            assert_eq!(on("/embeddings", None), arrival);
+        }
+    }
 
-        let hint = not_found_hint(Surface::Codex, "/v1/messages");
-        assert!(hint.contains("10011"), "{hint}");
+    #[test]
+    fn claude_chat_keeps_compat_layer_only_on_its_port() {
+        let none = HeaderMap::new();
+        let chat = |arrival| {
+            surface_for(
+                arrival,
+                "/v1/chat/completions",
+                &none,
+                Some("claude-opus-5"),
+            )
+        };
+        assert_eq!(chat(Surface::Codex), Surface::ClaudeCode);
+        assert_eq!(chat(Surface::ClaudeCode), Surface::ClaudeCode);
+        assert_eq!(chat(Surface::ClaudeOpenAI), Surface::ClaudeOpenAI);
+    }
 
-        // 原生 Messages 打到兼容层端口 -> 指回 10011
-        let hint = not_found_hint(Surface::ClaudeOpenAI, "/v1/messages");
-        assert!(hint.contains("10011"), "{hint}");
+    #[test]
+    fn anthropic_model_list_from_any_port() {
+        let mut h = HeaderMap::new();
+        h.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+        for arrival in Surface::ALL {
+            assert_eq!(
+                surface_for(arrival, "/v1/models", &h, None),
+                Surface::ClaudeCode
+            );
+        }
+    }
 
-        // 谁都不认的路径 -> 列本端口可用路径
-        let hint = not_found_hint(Surface::Codex, "/embeddings");
-        assert!(hint.contains("/v1/responses"), "{hint}");
+    #[test]
+    fn not_found_hint_lists_every_endpoint() {
+        let hint = not_found_hint("/embeddings");
+        for e in ENDPOINTS {
+            assert!(hint.contains(e), "{hint}");
+        }
     }
 
     #[test]
@@ -1052,7 +1106,7 @@ mod tests {
             Dialect::OpenAI
         );
 
-        // 纯 OpenAI 形状的端口不随客户端头摇摆
+        // 纯 OpenAI 形状的协议面不随客户端头摇摆
         for s in [Surface::Codex, Surface::ClaudeOpenAI] {
             assert_eq!(Dialect::of(s, &anthropic), Dialect::OpenAI);
         }

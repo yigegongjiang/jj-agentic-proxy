@@ -1463,7 +1463,11 @@ async function runCommand(cmd) {
     try {
       const s = await api('/api/status');
       const lines = [`运行中 (pid ${s.pid})`];
-      for (const e of s.endpoints) lines.push(`- ${e.surface.padEnd(13)} http://127.0.0.1:${e.port}`);
+      // 与 CLI `print_endpoints` 同形: 首个端口 = base url, 其余只为旧配置保留
+      const [base, ...legacy] = s.endpoints;
+      lines.push(`- ${'base url'.padEnd(13)} http://127.0.0.1:${base.port} (OpenAI / Anthropic / Codex 协议都接, 按 model 分流)`);
+      lines.push(`  透传口: http://127.0.0.1:${base.port}/backend-api/codex/* (打上游私有端点, 如 /usage 查额度)`);
+      lines.push(`  旧端口 ${legacy.map(e => e.port).join(' / ')} 继续可用, 已有配置不用改`);
       lines.push(`- ${'web-ui'.padEnd(13)} http://127.0.0.1:${s.ui_port}`);
       lines.push(`日志: ${s.daemon_log}`);
       lines.push(`往返记录: ${s.record_dir} (按天分文件, 不自动清理)`);
@@ -1486,7 +1490,7 @@ async function runCommand(cmd) {
       const r = await api('/api/models');
       const lines = [];
       for (const p of r.providers) {
-        lines.push(`${p.provider} (端口 ${p.ports})`);
+        lines.push(p.provider);
         if (!p.logged_in) { lines.push(`  未登录 (\`jj-agentic-traffic login ${p.provider}\`)`); continue; }
         if (!p.models.length) lines.push('  取不到列表 (上游异常或凭证失效)');
         for (const m of p.models) lines.push(`  ${m}`);
