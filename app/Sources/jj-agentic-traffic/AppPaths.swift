@@ -11,15 +11,6 @@ nonisolated enum AppPaths {
         return base.appendingPathComponent("jj-agentic-traffic", isDirectory: true)
     }
 
-    /// 与 CLI 的 `store::migrate_legacy_dir` 同一规则: 新目录不在而旧名目录在 -> 整目录 rename, 只搬不合并。
-    /// app 先于 CLI 打开时也能直接看到旧往返记录; 两边并发时 rename 原子, 输的一方失败即忽略。
-    static func migrateLegacy() {
-        let legacy = configDir.deletingLastPathComponent().appendingPathComponent("jj-agentic-proxy", isDirectory: true)
-        let fm = FileManager.default
-        guard !fm.fileExists(atPath: configDir.path), fm.fileExists(atPath: legacy.path) else { return }
-        try? fm.moveItem(at: legacy, to: configDir)
-    }
-
     static var logDir: URL {
         configDir.appendingPathComponent("log", isDirectory: true)
     }

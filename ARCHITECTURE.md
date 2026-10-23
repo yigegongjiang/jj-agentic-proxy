@@ -121,7 +121,7 @@ curl http://127.0.0.1:10010/backend-api/codex/usage  # 订阅额度: plan_type +
 - `start` 拉起后台进程后等它写下就绪标记才报成功 (不靠「端口通」, 避免把别人占的端口认成自己); `stop` = SIGTERM -> 等锁释放 -> 5s 未退则 SIGKILL
 - 后台日志单文件 8MB 上限, 满则轮转一份 -> 磁盘占用恒定, 不随运行时长增长
 - 认证: OAuth PKCE (S256); 回调端口被上游 client_id allow-list 写死 (Anthropic 54545 / Codex 1455), 登录时须空闲
-- 改名迁移 (v0.15 `jj-agentic-proxy` -> `jj-agentic-traffic`): CLI 每次启动 + app 打开时, 新配置目录不在而旧名目录在 -> 整目录 rename (凭证 / 往返记录 / pid 锁一起搬), 只搬不合并; app 装终端入口时顺手删旧名 symlink
+- 改名迁移 (v0.15 `jj-agentic-proxy` -> `jj-agentic-traffic`): 仅 CLI 做 (每个子命令开头; app 打开即跑 `status` 触发), 新配置目录不在而旧名目录在 -> 整目录 rename (凭证 / 往返记录 / pid 锁一起搬), 只搬不合并; 搬完探到旧版 daemon 即 stop. 实测坑: 旧 daemon 留着会在旧路径重建目录并把轮换后的 refresh token 写回旧处 -> 新目录那份作废. app 不自己搬 (抢先搬了 CLI 就探不到要停的旧 daemon), 装终端入口时顺手删旧名 symlink
 - 凭证: `auth.json` 进程间串行 + 原子写 + 0600; login/logout 热更新; 到期前 300s 主动刷新; 上游 401 时强制续期并重试一次
   - 刷新跑在独立 task, 进程内单飞锁随之移交 -> 客户端断开只取消等待, 不中断「换 token -> 落盘」. 实测坑 (09-15 / 08-03): 刷新内联在请求 future 里, 客户端恰在刷新途中断开 -> 上游已轮换 refresh token 而新值未落盘 -> 持续 `invalid_grant` 直到重新 login
   - 跨进程: daemon 与 `models` 等 CLI 子进程各持进程内锁互不可见 -> 另加 `refresh-<provider>.lock` (flock) 串行刷新, 拿到锁后以盘上为准重判; 不复用 `auth.lock`: 持锁期间要 `put`, flock 按打开的文件描述计, 同一把会自锁
@@ -178,5 +178,5 @@ app/Sources/jj-agentic-traffic/
   ConsoleWindowController.swift + CommandRunner.swift  CLI 控制台面板 + 子进程输出实时回吐
   main.swift + AppDelegate.swift + MainMenu.swift      入口 (`--snapshot <png> [--filter <词>]` 界面自检) / 主窗口 + 尺寸持久化 / 主菜单
   CLIInstall.swift                                     终端命令入口: 打开 app 时检查 ~/.local/bin symlink, 缺则弹窗一键建 + 摘 quarantine + `--version` 自检
-  AppPaths.swift                                       CLI 定位 (首选自身同目录那份) / 日志目录 / 旧名目录迁移
+  AppPaths.swift                                       CLI 定位 (首选自身同目录那份) / 日志目录
 ```

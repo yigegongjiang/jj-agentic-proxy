@@ -65,8 +65,15 @@ enum Cmd {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    // 先于一切读写配置目录的子命令 (含 serve): 旧名目录里的登录态与往返记录原样接过来
-    store::migrate_legacy_dir();
+    // 先于一切读写配置目录的子命令 (含 serve): 旧名目录里的登录态与往返记录原样接过来。
+    // rename 搬的是 inode -> 旧版 daemon 的 pid 锁在新路径可见。必须当场停掉它: 留着会在旧路径重建目录,
+    // 把轮换后的 refresh token 写回旧处 -> 新目录里那份作废, 下次刷新 invalid_grant 只能重新 login。
+    if store::migrate_legacy_dir() && matches!(daemon::running(), Ok(Some(_))) {
+        eprintln!("已迁移旧版配置, 停止旧版后台进程");
+        if let Err(e) = daemon::stop() {
+            eprintln!("停止旧版后台进程失败: {e:#}");
+        }
+    }
     match cli.cmd.unwrap_or(Cmd::Start) {
         Cmd::Start => daemon::start(),
         Cmd::Stop => daemon::stop(),

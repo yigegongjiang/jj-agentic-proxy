@@ -72,13 +72,14 @@ pub fn config_dir() -> PathBuf {
 const LEGACY_DIR_NAME: &str = "jj-agentic-proxy";
 
 /// 改名迁移: 新目录不存在而旧目录在 -> 整目录 rename, 凭证 / 往返记录 / pid 文件一起搬。
-/// 只搬不合并: 新目录一旦存在即视为已迁移。rename 搬的是 inode -> 旧版 daemon 持有的 pid 锁随之过来,
-/// 新版 `start` 照常探到并先停掉它, 不会双占端口。失败只告警: 等同未登录, 不阻断启动。
-pub fn migrate_legacy_dir() {
+/// 只搬不合并: 新目录一旦存在即视为已迁移。返回是否真的搬了 (调用方据此停掉旧版 daemon)。
+/// 失败只告警: 等同未登录, 不阻断启动。
+pub fn migrate_legacy_dir() -> bool {
     let dir = config_dir();
-    if let Err(e) = migrate_legacy(&dir) {
+    migrate_legacy(&dir).unwrap_or_else(|e| {
         eprintln!("迁移旧配置目录失败 ({}): {e:#}", dir.display());
-    }
+        false
+    })
 }
 
 fn migrate_legacy(dir: &Path) -> Result<bool> {

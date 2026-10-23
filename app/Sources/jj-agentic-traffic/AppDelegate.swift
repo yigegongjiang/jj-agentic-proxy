@@ -10,7 +10,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private static let minSize = NSSize(width: 900, height: 520)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        AppPaths.migrateLegacy() // 先于主窗口读日志目录
         NSApp.mainMenu = MainMenu.build()
         setupWindow()
         NSApp.activate(ignoringOtherApps: true)
