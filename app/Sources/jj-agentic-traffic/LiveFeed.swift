@@ -1,9 +1,9 @@
 import Foundation
 
-// 进行中的往返只在代理进程内存里 (落盘要等响应结束) -> 经查看器端口取, 不读文件。
+// 进行中的往返只在代理进程内存里 (落盘要等响应结束) -> 经 app 数据口 (:10020) 取, 不读文件。
 // 代理没在跑 / 端口不通 = 没有进行中的记录, 不算错误。
 nonisolated enum LiveFeed {
-    /// 与 CLI 侧 `provider::UI_PORT` 一致; 只连 loopback (查看器端口恒绑 127.0.0.1)
+    /// 与 CLI 侧 `provider::FEED_PORT` 一致; 只连 loopback (数据口恒绑 127.0.0.1)
     static let base = URL(string: "http://127.0.0.1:10020/api/inflight")!
 
     private static let session: URLSession = {

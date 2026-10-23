@@ -30,9 +30,9 @@ pub const CLIENT_API_KEY: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJodHRwc
 /// 代理唯一端口: 全部协议 + 两家订阅都在这里, 按 path + model 分流。固定不可配置 -> 客户端 base url 永远可写死。
 pub const PORT: u16 = 10010;
 
-/// Web 查看器端口。刻意不进 `Surface`: 它不是协议面, 没有上游与凭证映射,
+/// app 数据口 (进行中记录, 见 `feed`)。刻意不进 `Surface`: 它不是协议面, 没有上游与凭证映射,
 /// 混进去会让透传 / 模型列表 / 错误信封到处长出「这个面不是代理」的分支。
-pub const UI_PORT: u16 = 10020;
+pub const FEED_PORT: u16 = 10020;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Provider {

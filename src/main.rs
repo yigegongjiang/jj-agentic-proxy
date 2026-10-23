@@ -3,6 +3,7 @@
 mod auth;
 mod convert;
 mod daemon;
+mod feed;
 mod oauth;
 mod passthrough;
 mod provider;
@@ -10,7 +11,6 @@ mod reqlog;
 mod server;
 mod sse;
 mod store;
-mod webui;
 
 use std::future::IntoFuture as _;
 use std::sync::Arc;
@@ -46,7 +46,7 @@ enum Cmd {
     /// 后台进程本体, 由 start 拉起 (不直接使用)
     #[command(hide = true)]
     Serve,
-    /// Web OAuth 授权: anthropic | codex
+    /// OAuth 授权 (打开浏览器): anthropic | codex
     Login { provider: String },
     /// 删除本地凭证: anthropic | codex | all
     Logout { provider: String },
@@ -113,9 +113,9 @@ async fn serve() -> Result<()> {
     });
 
     // 先全部 bind 再 serve: 端口被占用要立刻失败, 不留半个可用端口的中间态。
-    // 查看器端口与协议面同等对待 -> 不会出现「代理在跑但看不见流量」的半残状态。
+    // app 数据口与协议面同等对待 -> 不会出现「代理在跑但 app 看不见进行中」的半残状态。
     let api_bound = bind(provider::PORT).await?;
-    let ui_bound = bind(provider::UI_PORT).await?;
+    let feed_bound = bind(provider::FEED_PORT).await?;
 
     let mut tasks: Vec<(&'static str, tokio::task::JoinHandle<_>)> = Vec::new();
     log_listen(API_LABEL, &api_bound);
@@ -127,11 +127,11 @@ async fn serve() -> Result<()> {
                 .into_future(),
         ),
     ));
-    log_listen(UI_LABEL, &ui_bound);
+    log_listen(FEED_LABEL, &feed_bound);
     tasks.push((
-        UI_LABEL,
+        FEED_LABEL,
         tokio::spawn(
-            axum::serve(ui_bound, webui::router(app.clone()))
+            axum::serve(feed_bound, feed::router())
                 .with_graceful_shutdown(shutdown())
                 .into_future(),
         ),
@@ -172,8 +172,8 @@ fn next_probe_retry(prev: Option<Duration>) -> Duration {
     prev.map_or(PROBE_RETRY_MIN, |d| (d * 2).min(PROBE_INTERVAL))
 }
 
-/// 查看器不是协议面 -> 没有 `Surface` 可借, 单独一个标签。
-const UI_LABEL: &str = "web-ui";
+/// app 数据口不是协议面 -> 没有 `Surface` 可借, 单独一个标签。
+const FEED_LABEL: &str = "feed";
 const API_LABEL: &str = "api";
 
 fn log_listen(label: &str, listener: &tokio::net::TcpListener) {
@@ -213,7 +213,7 @@ async fn bind(port: u16) -> Result<tokio::net::TcpListener> {
         })
 }
 
-/// base url + 查看器 (start / status 共用)。
+/// base url + 透传口 + api key (start / status 共用)。
 pub(crate) fn print_endpoints() {
     println!(
         "- {:<13} http://{}:{} (OpenAI / Anthropic / Codex 协议都接, 按 model 分流)",
@@ -227,11 +227,6 @@ pub(crate) fn print_endpoints() {
         "  透传口: http://{}:{}/backend-api/codex/* (打上游私有端点, 如 /usage 查额度)",
         provider::HOST,
         provider::PORT
-    );
-    println!(
-        "- {UI_LABEL:<13} http://{}:{} (浏览器打开看往返记录)",
-        provider::HOST,
-        provider::UI_PORT
     );
     // 代理不校验 key, 但 codex 面的部分客户端会本地解析它 -> 给一份能直接复制的。
     println!("- {:<13} {}", "api key", provider::CLIENT_API_KEY);

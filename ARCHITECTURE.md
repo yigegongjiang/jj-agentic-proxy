@@ -82,9 +82,9 @@ curl http://127.0.0.1:10010/backend-api/codex/usage  # 订阅额度: plan_type +
 - 不记 `/health` (本机探活, 无上游往返); 上游响应体不单独记 (透传面与客户端那份相同)
 - 流式响应逐块 tee 落盘, 不缓冲转发 -> 记录不影响 SSE 首字延迟
 
-## 查看器 (浏览器 + macOS app 两份)
+## 查看器 (macOS app)
 
-唯一职责是把上面的记录读给人看, 代理能力一概不实现. 两份业务功能对齐, 读同一份 `.jsonl`, 同一套视图与排版:
+唯一职责是把上面的记录读给人看, 代理能力一概不实现; 读 `.jsonl` + 进行中接口:
 
 - 左列表 (新 -> 旧) + 右上下面板: 选中一条即绑定展示它的 Request / Response
   - 列: Time (秒) / Surface / Endpoint (去 query 与 `/v1` `/backend-api` 前缀, POST 不写) / Model / Status / Took / Tokens (`in → out`); 字节数只在面板标题
@@ -105,20 +105,16 @@ curl http://127.0.0.1:10010/backend-api/codex/usage  # 订阅额度: plan_type +
   - 列表 Time 列: 进行中 = 请求进来的时刻, 落盘后 = 行的 `ts` (结束时刻)
 - 数据只读: 记录由代理写, 查看器从不写回
 
-差异只在服务操作上:
-
-- 浏览器版 (`:10020`): 操作直接调进程内的同一套实现, 不 exec CLI; `Console` 面板跑 Status / Models / Login / Logout / Stop 并回显。**`start` 例外** —— 页面由代理进程本身提供, 进程没起来时页面也不存在, 只能在终端执行
-- macOS app (`app/`, SwiftPM + AppKit, 零第三方依赖): 全部转调 CLI 子进程 (`Console…` 面板实时回显), 因此 Start 也能点; app 不复刻任何判断
-  - 唯一的网络读取 = 进行中记录 (`http://127.0.0.1:10020/api/inflight`, 1s 超时); 代理没在跑 = 没有进行中, 不报错; Info.plist 开 `NSAllowsLocalNetworking` (明文 http 到回环)
-- Login 的授权回调端口写死在上游 client_id allow-list -> 浏览器只会开在跑着代理的那台机器上, 与从哪台机器点的无关
+- 服务操作全部转调 CLI 子进程 (`Console…` 面板实时回显), 因此 Start 也能点; app 不复刻任何判断
+- 唯一的网络读取 = 进行中记录 (`http://127.0.0.1:10020/api/inflight`, 1s 超时); 代理没在跑 = 没有进行中, 不报错; Info.plist 开 `NSAllowsLocalNetworking` (明文 http 到回环)
+- `:10020` 只有 `/api/inflight` + `/api/inflight/{id}` 两条路由 (`src/feed.rs`), 其余 404; 不读文件, 不做服务操作
+- Login 的授权回调端口写死在上游 client_id allow-list -> 浏览器只会开在跑着代理的那台机器上
 
 ## 架构
 
 - 单进程 axum, 两个协议面共用凭证与连接池; 建连超时 20s / 读取空闲超时 300s; 直连上游无云端中转; req/res 只落本机日志目录
-- 启动时先 bind 全部端口 (代理 + 查看器) 再对外服务: 任一被占立刻整体失败, 不留「只有一部分能用」的中间态
-- 查看器端口不进协议面枚举: 它没有上游与凭证映射, 混进去会让透传 / 模型列表 / 错误信封处处长出「这个面不是代理」的分支
-- 查看器的文件读取走 `spawn_blocking`: 单日记录可以是 GB 级 (body 全量且永不清理), 同步读会阻塞 runtime 拖累 SSE 首字延迟
-- 查看器只吐摘要行与整行原文, 语义渲染 (SSE 重建 / 三方言归一) 在浏览器里做 -> 代理侧零解析负担
+- 启动时先 bind 全部端口 (代理 + app 数据口) 再对外服务: 任一被占立刻整体失败, 不留「只有一部分能用」的中间态
+- app 数据口不进协议面枚举: 它没有上游与凭证映射, 混进去会让透传 / 模型列表 / 错误信封处处长出「这个面不是代理」的分支
 - 每个端口只绑 `127.0.0.1`, 绑不上即判定端口被占并整体失败; MUST NOT 加回 `::` / `0.0.0.0`: 端口无鉴权, 通配面 = 局域网任何人可用本机订阅 + 读往返记录 (2026-10 安全审计)
 - 单实例: `daemon.pid` 独占文件锁, 锁由内核在进程退出时释放 -> 判活不受 pid 复用 / 残留 pid 文件影响
 - `start` 拉起后台进程后等它写下就绪标记才报成功 (不靠「端口通」, 避免把别人占的端口认成自己); `stop` = SIGTERM -> 等锁释放 -> 5s 未退则 SIGKILL
@@ -158,7 +154,7 @@ curl http://127.0.0.1:10010/backend-api/codex/usage  # 订阅额度: plan_type +
 ## 结构
 
 ```
-src/main.rs                    CLI (start / stop / login / logout / status / models / logs) + 四个固定端口 + 优雅退出
+src/main.rs                    CLI (start / stop / login / logout / status / models / logs) + 两个固定端口 (10010 代理 / 10020 app 数据口) + 优雅退出
 src/daemon.rs                  后台常驻: 单实例锁 + 探活 + 启停 + 日志封顶
 src/server.rs                  端口层: Chat Completions + 模型列表 + 往返记录挂点, 其余落透传
 src/passthrough.rs             透传: 上游由端口定 + header 注入 + body 规范化 + 带凭证请求上游
@@ -166,7 +162,7 @@ src/convert/ + sse.rs          Chat Completions <-> OpenAI Responses (codex.rs) 
 src/reqlog.rs                  往返记录: 一行一次 req/res + 按天分文件 (不清理) + logs 摘要
 src/{auth,oauth,store}.rs      凭证内存态 / 到期预判 / 单飞刷新; PKCE + 本机回调 + 两家 token 换取·刷新; auth.json 原子写 0600
 src/provider.rs                协议面 <-> 端口 / 订阅映射 + 两家上游常量 (client_id / endpoint / CLI 冒充参数)
-src/webui.rs + webui/app.html  浏览器查看器: 只读接口 (日期 / 增量索引 / 整行原文 / 进行中) + 状态 + 服务操作; 前端单文件 include_str! 进二进制, 零外部资源
+src/feed.rs                    app 数据口 (:10020): 进行中记录只读接口 (摘要列表 + 整行快照)
 scripts/install-local.sh       本机预部署总入口 = 本机架构构建 + 装 /Applications + 链接终端命令 (→ workflow.md); 只给开发用, 用户侧不跑脚本
 scripts/make-dist.sh           分发打包: arm64 / x86_64 各构建一套 -> dist/ 下 dmg + SHA256SUMS + release notes
 .github/workflows/release.yml  打 tag 即发版: 验证 + 跑 make-dist.sh + 产物传 GitHub Release (CI 是脚本的薄壳, 本机可复现)
@@ -176,7 +172,7 @@ app/Sources/jj-agentic-traffic/
   MainViewController.swift + BodyPane.swift            列表 / 过滤 / follow / 详情绑定 + 单 body 面板 (等宽只读 + Copy)
   CoreContent.swift                                    核心内容视图: SSE 重建 + 三方言归一 + 纯文本排版
   TrafficRecord.swift + TrafficReader.swift            行首摘要解析 + 日期枚举 / 增量索引 / 按 (offset, length) 现取全文
-  LiveFeed.swift                                       进行中记录: 经查看器端口取摘要列表 + 整行快照
+  LiveFeed.swift                                       进行中记录: 经 app 数据口取摘要列表 + 整行快照
   ConsoleWindowController.swift + CommandRunner.swift  CLI 控制台面板 + 子进程输出实时回吐
   main.swift + AppDelegate.swift + MainMenu.swift      入口 (`--snapshot <png> [--filter <词>]` 界面自检) / 主窗口 + 尺寸持久化 / 主菜单
   CLIInstall.swift                                     终端命令入口: 打开 app 时检查 ~/.local/bin symlink, 缺则弹窗一键建 + 摘 quarantine + `--version` 自检
